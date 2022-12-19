@@ -134,6 +134,15 @@ public:
 		ParameterReverbLowPass,
 		ParameterReverbDiffusion,
 		ParameterReverbLevel,
+
+#ifdef ARM_ALLOW_MULTI_CORE
+		/* UNISON START */
+		ParameterUnisonEnable,
+		ParameterUnisonPanSpread,
+		ParameterUnisonDetuneSpread,
+		/* UNISON END */
+#endif
+
 		ParameterUnknown
 	};
 
@@ -299,7 +308,7 @@ private:
 
 	bool m_bSavePerformance;
 	bool m_bLoadPerformanceBusy;
-	bool m_bSaveAsDeault;
+	bool m_bSaveAsDefault;
 };
 
 #endif
