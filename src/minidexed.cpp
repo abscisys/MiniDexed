@@ -813,7 +813,7 @@ void CMiniDexed::SetParameter (TParameter Parameter, int nValue)
 	case ParameterFXChainChorusDepth: 
 		nValue = constrain((int)nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
-		this->fx_rack->getChorus()->setDepth(nValue / 9.9f);
+		this->fx_rack->getChorus()->setDepth(nValue / 99.0f);
 		this->m_FXSpinLock.Release();
 		break;
 	
