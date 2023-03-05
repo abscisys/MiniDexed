@@ -23,7 +23,11 @@ fi
 # Build circle-stdlib library
 cd circle-stdlib/
 make mrproper || true
-./configure -r ${RPI} --prefix "${TOOLCHAIN_PREFIX}" ${OPTIONS} -o KERNEL_MAX_SIZE=0x400000
+if [ "${QEMU}" -eq "0" ]; then
+    ./configure -r ${RPI} --prefix "${TOOLCHAIN_PREFIX}" ${OPTIONS} -o KERNEL_MAX_SIZE=0x400000
+else
+    ./configure --qemu -r ${RPI} --prefix "${TOOLCHAIN_PREFIX}" ${OPTIONS} -o KERNEL_MAX_SIZE=0x400000
+fi
 make -j
 
 # Build additional libraries
