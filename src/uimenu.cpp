@@ -29,6 +29,10 @@
 #include <cmath>
 #include <circle/sysconfig.h>
 #include <assert.h>
+#include <chrono>
+#include <random>
+
+#include <dexed.h>
 
 using namespace std;
 
@@ -94,6 +98,7 @@ const CUIMenu::TMenuItem CUIMenu::s_TGMenu[] =
 	{"Modulation",	CUIMenu::MenuHandler,		CUIMenu::s_ModulationMenu},
 	{"Channel",		CUIMenu::EditTGParameter,	0, CMiniDexed::TTGParameter::TGParameterMIDIChannel},
 	{"Edit Voice",	CUIMenu::MenuHandler,		CUIMenu::s_EditVoiceMenu},
+	{"Random", CUIMenu::GenerateRandomPreset, nullptr, 0},
 	{0}
 };
 
@@ -116,6 +121,7 @@ const CUIMenu::TMenuItem CUIMenu::s_EffectsMenu[] =
 	{"MainOut", CUIMenu::MenuHandler, CUIMenu::s_FXMainOutputLevels},
 	{"Bypass",	CUIMenu::EditGlobalParameter, 0, CMiniDexed::TParameter::ParameterFXBypass},
 #endif
+	{"Random", CUIMenu::GenerateRandomFX, nullptr, 0},
 	{0}
 };
 
@@ -610,6 +616,7 @@ const CUIMenu::TMenuItem CUIMenu::s_OperatorMenu[] =
 	{"A Mod Sens.",	EditOPParameter,	0,	DEXED_OP_AMP_MOD_SENS},
 	{"K Vel. Sens.",EditOPParameter,	0,	DEXED_OP_KEY_VEL_SENS},
 	{"Enable", EditOPParameter, 0, DEXED_OP_ENABLE},
+	{"Random", CUIMenu::GenerateRandomOperator, nullptr, 0},
 	{0}
 };
 
@@ -890,6 +897,7 @@ const CUIMenu::TMenuItem CUIMenu::s_PerformanceMenu[] =
 	{"Load",	PerformanceMenu, 0, 0}, 
 	{"Save",	MenuHandler,	s_SaveMenu},
 	{"Delete",	PerformanceMenu, 0, 1}, 
+	{"Random", CUIMenu::GenerateRandomPerformance, nullptr, 0},
 	{0}
 };
 
@@ -2172,5 +2180,115 @@ void CUIMenu::EditTGParameterModulation (CUIMenu *pUIMenu, TMenuEvent Event)
 				      pUIMenu->m_pParentMenu[pUIMenu->m_nCurrentMenuItem].Name,
 				      Value.c_str (),
 				      nValue > rParam.Minimum, nValue < rParam.Maximum);
+}
+
+// RANDOMIZATION
+
+int CUIMenu::GetRandomValue(int min, int max)
+{
+	static std::mt19937 gen(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::high_resolution_clock::now().time_since_epoch()).count());
+
+	std::uniform_int_distribution<int> dice(min, max);
+
+	return dice(gen);
+}
+
+void CUIMenu::GenerateRandomOperator(CUIMenu *pUIMenu, TMenuEvent Event)
+{
+	if (Event != TMenuEvent::MenuEventSelect)
+	{
+		return;
+	}
+
+	size_t nTG = pUIMenu->m_nMenuStackParameter[pUIMenu->m_nCurrentMenuDepth - 3];
+	size_t nOP = pUIMenu->m_nMenuStackParameter[pUIMenu->m_nCurrentMenuDepth - 1];
+
+	CUIMenu::GenerateRandomOperatorTG(pUIMenu, nTG, nOP);
+}
+
+void CUIMenu::GenerateRandomOperatorTG(CUIMenu *pUIMenu, size_t nTG, size_t nOP)
+{
+	assert(nTG < CConfig::ToneGenerators);
+	assert(nOP <= OPERATORS::OP6);
+
+	for (int nParam = DexedVoiceOPParameters::DEXED_OP_EG_R1; nParam <= DexedVoiceOPParameters::DEXED_OP_OSC_DETUNE; ++nParam)
+	{
+		TParameter param = CUIMenu::s_OPParameter[nParam];
+		uint8_t value = (uint8_t)CUIMenu::GetRandomValue(param.Minimum, param.Maximum);
+		pUIMenu->m_pMiniDexed->SetVoiceParameter(nParam, value, nOP, nTG);
+	}
+}
+
+void CUIMenu::GenerateRandomVoice(CUIMenu *pUIMenu, size_t nTG)
+{
+	assert(nTG < CConfig::ToneGenerators);
+
+	for (size_t nOP = OPERATORS::OP1; nOP <= OPERATORS::OP6; ++nOP)
+	{
+		CUIMenu::GenerateRandomOperatorTG(pUIMenu, nTG, nOP);
+	}
+
+	for (int nParam = DexedVoiceParameters::DEXED_PITCH_EG_R1; nParam < DexedVoiceParameters::DEXED_NAME; ++nParam)
+	{
+		TParameter param = CUIMenu::s_VoiceParameter[nParam];
+		uint8_t value = (uint8_t)CUIMenu::GetRandomValue(param.Minimum, param.Maximum);
+		pUIMenu->m_pMiniDexed->SetVoiceParameter(nParam, value, CMiniDexed::NoOP, nTG);
+	}
+}
+
+void CUIMenu::GenerateRandomPreset(CUIMenu *pUIMenu, TMenuEvent Event)
+{
+	if (Event != TMenuEvent::MenuEventSelect)
+	{
+		return;
+	}
+
+	size_t nTG = pUIMenu->m_nMenuStackParameter[pUIMenu->m_nCurrentMenuDepth - 1];
+
+	CUIMenu::GenerateRandomPresetTG(pUIMenu, nTG);
+}
+
+void CUIMenu::GenerateRandomPresetTG(CUIMenu *pUIMenu, size_t nTG)
+{
+	assert(nTG < CConfig::ToneGenerators);
+
+	CUIMenu::GenerateRandomVoice(pUIMenu, nTG);
+
+	for (int nParam = CMiniDexed::TTGParameter::TGParameterVolume; nParam < CMiniDexed::TTGParameter::TGParameterUnknown; ++nParam)
+	{
+		TParameter param = CUIMenu::s_TGParameter[nParam];
+		uint8_t value = (uint8_t)CUIMenu::GetRandomValue(param.Minimum, param.Maximum);
+		pUIMenu->m_pMiniDexed->SetTGParameter(static_cast<CMiniDexed::TTGParameter>(nParam), value, nTG);
+	}
+	pUIMenu->m_pMiniDexed->SetTGParameter(CMiniDexed::TTGParameter::TGParameterMIDIChannel, CMIDIDevice::OmniMode, nTG);
+}
+
+void CUIMenu::GenerateRandomFX(CUIMenu *pUIMenu, TMenuEvent Event)
+{
+	if (Event != TMenuEvent::MenuEventSelect)
+	{
+		return;
+	}
+
+	for (int nParam = CMiniDexed::TParameter::ParameterCompressorEnable; nParam < CMiniDexed::TParameter::ParameterUnknown; ++nParam)
+	{
+		TParameter param = CUIMenu::s_GlobalParameter[nParam];
+		uint8_t value = (uint8_t)CUIMenu::GetRandomValue(param.Minimum, param.Maximum);
+		pUIMenu->m_pMiniDexed->SetParameter(static_cast<CMiniDexed::TParameter>(nParam), value);
+	}
+}
 				   
+void CUIMenu::GenerateRandomPerformance(CUIMenu *pUIMenu, TMenuEvent Event)
+{
+	if (Event != TMenuEvent::MenuEventSelect)
+	{
+		return;
+}
+
+	for (size_t nTG = 0; nTG < CConfig::ToneGenerators; ++nTG)
+	{
+		CUIMenu::GenerateRandomPresetTG(pUIMenu, nTG);
+	}
+
+	CUIMenu::GenerateRandomFX(pUIMenu, Event);
 }
