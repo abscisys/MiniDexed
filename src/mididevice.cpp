@@ -71,7 +71,7 @@ CMIDIDevice::CMIDIDevice(CMiniDexed *pSynthesizer, CConfig *pConfig, CUserInterf
 	  m_pConfig(pConfig),
 	  m_pUI(pUI)
 {
-	for (unsigned nTG = 0; nTG < CConfig::ToneGenerators; nTG++)
+	for (unsigned nTG = 0; nTG < CConfig::AllToneGenerators; nTG++)
 	{
 		m_ChannelMap[nTG] = Disabled;
 	}
@@ -84,13 +84,13 @@ CMIDIDevice::~CMIDIDevice (void)
 
 void CMIDIDevice::SetChannel (u8 ucChannel, unsigned nTG)
 {
-	assert (nTG < CConfig::ToneGenerators);
+	assert (nTG < CConfig::AllToneGenerators);
 	m_ChannelMap[nTG] = ucChannel;
 }
 
 u8 CMIDIDevice::GetChannel (unsigned nTG) const
 {
-	assert (nTG < CConfig::ToneGenerators);
+	assert (nTG < CConfig::AllToneGenerators);
 	return m_ChannelMap[nTG];
 }
 
@@ -190,21 +190,62 @@ void CMIDIDevice::MIDIMessageHandler (const u8 *pMessage, size_t nLength, unsign
 	else
 	{
 		// Perform any MiniDexed level MIDI handling before specific Tone Generators
+		unsigned nPerfCh = m_pSynthesizer->GetPerformanceSelectChannel();
 		switch (ucType)
 		{
 		case MIDI_CONTROL_CHANGE:
+			// Check for performance PC messages
+			if (nPerfCh != Disabled)
+			{
+				if ((ucChannel == nPerfCh) || (nPerfCh == OmniMode))
+				{
+					if (pMessage[1] == MIDI_CC_BANK_SELECT_MSB)
+					{
+						m_pSynthesizer->BankSelectMSBPerformance (pMessage[2]);
+					}
+					else if (pMessage[1] == MIDI_CC_BANK_SELECT_LSB)
+					{
+						m_pSynthesizer->BankSelectLSBPerformance (pMessage[2]);
+					}
+					else
+					{
+						// Ignore any other CC messages at this time
+					}
+				}
+			}
+			if (nLength == 3)
+			{
+				m_pUI->UIMIDICmdHandler (ucChannel, ucStatus & 0xF0, pMessage[1], pMessage[2]);
+			}
+			break;
+
 		case MIDI_NOTE_OFF:
 		case MIDI_NOTE_ON:
 			if (nLength < 3)
 			{
-				break;	
+				break;
 			}
 			m_pUI->UIMIDICmdHandler (ucChannel, ucStatus & 0xF0, pMessage[1], pMessage[2]);
 			break;
+
+		case MIDI_PROGRAM_CHANGE:
+			// Check for performance PC messages
+			if( m_pConfig->GetMIDIRXProgramChange() )
+			{
+				if( nPerfCh != Disabled)
+				{
+					if ((ucChannel == nPerfCh) || (nPerfCh == OmniMode))
+					{
+						//printf("Performance Select Channel %d\n", nPerfCh);
+						m_pSynthesizer->ProgramChangePerformance (pMessage[1]);
+					}
+				}
+			}
+			break;
 		}
 
-		// Process MIDI for each Tone Generator
-		for (unsigned nTG = 0; nTG < CConfig::ToneGenerators; nTG++)
+		// Process MIDI for each active Tone Generator
+		for (unsigned nTG = 0; nTG < m_pConfig->GetToneGenerators(); nTG++)
 		{
 			if (ucStatus == MIDI_SYSTEM_EXCLUSIVE_BEGIN)
 			{
@@ -358,9 +399,11 @@ void CMIDIDevice::MIDIMessageHandler (const u8 *pMessage, size_t nLength, unsign
 						break;
 		
 					case MIDI_PROGRAM_CHANGE:
-						// do program change only if enabled in config
-						if( m_pConfig->GetMIDIRXProgramChange() )
+						// do program change only if enabled in config and not in "Performance Select Channel" mode
+						if( m_pConfig->GetMIDIRXProgramChange() && ( m_pSynthesizer->GetPerformanceSelectChannel() == Disabled) ) {
+							//printf("Program Change to %d (%d)\n", ucChannel, m_pSynthesizer->GetPerformanceSelectChannel());
 							m_pSynthesizer->ProgramChange (pMessage[1], nTG);
+						}
 						break;
 		
 					case MIDI_PITCH_BEND: {

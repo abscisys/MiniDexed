@@ -21,6 +21,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //
 #include "config.h"
+#include "../Synth_Dexed/src/dexed.h"
 
 CConfig::CConfig (FATFS *pFileSystem)
 :	m_Properties ("minidexed.ini", pFileSystem)
@@ -34,17 +35,51 @@ CConfig::~CConfig (void)
 void CConfig::Load (void)
 {
 	m_Properties.Load ();
+	
+	// Number of Tone Generators and Polyphony
+	m_nToneGenerators = m_Properties.GetNumber ("ToneGenerators", DefToneGenerators);
+	m_nPolyphony = m_Properties.GetNumber ("Polyphony", DefaultNotes);
+	// At present there are only two options for tone generators: min or max
+	// and for the Pi 1,2,3 these are the same anyway.
+	if ((m_nToneGenerators != MinToneGenerators) && (m_nToneGenerators != AllToneGenerators))
+	{
+		m_nToneGenerators = DefToneGenerators;
+	}
+	if (m_nPolyphony > MaxNotes)
+	{
+		m_nPolyphony = DefaultNotes;
+	}
+	
+	m_bUSBGadget = m_Properties.GetNumber ("USBGadget", 0) != 0;
+	m_nUSBGadgetPin = m_Properties.GetNumber ("USBGadgetPin", 0); // Default OFF
+	SetUSBGadgetMode(m_bUSBGadget); // Might get overriden later by USBGadgetPin state
 
 	m_SoundDevice = m_Properties.GetString ("SoundDevice", "pwm");
 
 	m_nSampleRate = m_Properties.GetNumber ("SampleRate", 48000);
+	m_bQuadDAC8Chan = m_Properties.GetNumber ("QuadDAC8Chan", 0) != 0;
+	if (m_SoundDevice == "hdmi") {
+		m_nChunkSize = m_Properties.GetNumber ("ChunkSize", 384*6);
+	}
+	else
+	{
 #ifdef ARM_ALLOW_MULTI_CORE
-	m_nChunkSize = m_Properties.GetNumber ("ChunkSize", m_SoundDevice == "hdmi" ? 384*6 : 256);
+		m_nChunkSize = m_Properties.GetNumber ("ChunkSize", m_bQuadDAC8Chan ? 1024 : 256);  // 128 per channel
 #else
-	m_nChunkSize = m_Properties.GetNumber ("ChunkSize", m_SoundDevice == "hdmi" ? 384*6 : 1024);
+		m_nChunkSize = m_Properties.GetNumber ("ChunkSize", 1024);
 #endif
+	}
 	m_nDACI2CAddress = m_Properties.GetNumber ("DACI2CAddress", 0);
 	m_bChannelsSwapped = m_Properties.GetNumber ("ChannelsSwapped", 0) != 0;
+
+	unsigned newEngineType = m_Properties.GetNumber ("EngineType", 1);
+	if (newEngineType == 2) {
+  		m_EngineType = MKI;
+	} else if (newEngineType == 3) {
+  		m_EngineType = OPL;
+	} else {
+  		m_EngineType = MSFA;
+	}
 
 	m_nMIDIBaudRate = m_Properties.GetNumber ("MIDIBaudRate", 31250);
 
@@ -70,7 +105,7 @@ void CConfig::Load (void)
 	
 	m_bMIDIRXProgramChange = m_Properties.GetNumber ("MIDIRXProgramChange", 1) != 0;
 	m_bIgnoreAllNotesOff = m_Properties.GetNumber ("IgnoreAllNotesOff", 0) != 0;
-	m_bMIDIAutoVoiceDumpOnPC = m_Properties.GetNumber ("MIDIAutoVoiceDumpOnPC", 1) != 0;
+	m_bMIDIAutoVoiceDumpOnPC = m_Properties.GetNumber ("MIDIAutoVoiceDumpOnPC", 0) != 0;
 	m_bHeaderlessSysExVoices = m_Properties.GetNumber ("HeaderlessSysExVoices", 0) != 0;
 	m_bExpandPCAcrossBanks = m_Properties.GetNumber ("ExpandPCAcrossBanks", 1) != 0;
 
@@ -89,6 +124,20 @@ void CConfig::Load (void)
 	m_nSSD1306LCDHeight = m_Properties.GetNumber ("SSD1306LCDHeight", 32);
 	m_bSSD1306LCDRotate = m_Properties.GetNumber ("SSD1306LCDRotate", 0) != 0;
 	m_bSSD1306LCDMirror = m_Properties.GetNumber ("SSD1306LCDMirror", 0) != 0;
+
+	m_nSPIBus = m_Properties.GetNumber ("SPIBus", SPI_INACTIVE);  // Disabled by default
+	m_nSPIMode = m_Properties.GetNumber ("SPIMode", SPI_DEF_MODE);
+	m_nSPIClockKHz = m_Properties.GetNumber ("SPIClockKHz", SPI_DEF_CLOCK);
+
+	m_bST7789Enabled = m_Properties.GetNumber ("ST7789Enabled", 0) != 0;
+	m_nST7789Data = m_Properties.GetNumber ("ST7789Data", 0);
+	m_nST7789Select = m_Properties.GetNumber ("ST7789Select", 0);
+	m_nST7789Reset = m_Properties.GetNumber ("ST7789Reset", 0);  // optional
+	m_nST7789Backlight = m_Properties.GetNumber ("ST7789Backlight", 0);  // optional
+	m_nST7789Width = m_Properties.GetNumber ("ST7789Width", 240);
+	m_nST7789Height = m_Properties.GetNumber ("ST7789Height", 240);
+	m_nST7789Rotation = m_Properties.GetNumber ("ST7789Rotation", 0);
+	m_bST7789SmallFont = m_Properties.GetNumber ("ST7789SmallFont", 0) != 0;
 
 	m_nLCDColumns = m_Properties.GetNumber ("LCDColumns", 16);
 	m_nLCDRows = m_Properties.GetNumber ("LCDRows", 2);
@@ -109,6 +158,16 @@ void CConfig::Load (void)
 	m_nDoubleClickTimeout = m_Properties.GetNumber ("DoubleClickTimeout", 400);
 	m_nLongPressTimeout = m_Properties.GetNumber ("LongPressTimeout", 600);
 
+	m_nButtonPinPgmUp = m_Properties.GetNumber ("ButtonPinPgmUp", 0);
+	m_nButtonPinPgmDown = m_Properties.GetNumber ("ButtonPinPgmDown", 0);
+	m_nButtonPinTGUp = m_Properties.GetNumber ("ButtonPinTGUp", 0);
+	m_nButtonPinTGDown = m_Properties.GetNumber ("ButtonPinTGDown", 0);
+
+	m_ButtonActionPgmUp = m_Properties.GetString ("ButtonActionPgmUp", "");
+	m_ButtonActionPgmDown = m_Properties.GetString ("ButtonActionPgmDown", "");
+	m_ButtonActionTGUp = m_Properties.GetString ("ButtonActionTGUp", "");
+	m_ButtonActionTGDown = m_Properties.GetString ("ButtonActionTGDown", "");
+
 	m_nMIDIButtonCh = m_Properties.GetNumber ("MIDIButtonCh", 0);
 	m_nMIDIButtonNotes = m_Properties.GetNumber ("MIDIButtonNotes", 0);
 	m_nMIDIButtonPrev = m_Properties.GetNumber ("MIDIButtonPrev", 0);
@@ -117,6 +176,11 @@ void CConfig::Load (void)
 	m_nMIDIButtonSelect = m_Properties.GetNumber ("MIDIButtonSelect", 0);
 	m_nMIDIButtonHome = m_Properties.GetNumber ("MIDIButtonHome", 0);
 
+	m_nMIDIButtonPgmUp = m_Properties.GetNumber ("MIDIButtonPgmUp", 0);
+	m_nMIDIButtonPgmDown = m_Properties.GetNumber ("MIDIButtonPgmDown", 0);
+	m_nMIDIButtonTGUp = m_Properties.GetNumber ("MIDIButtonTGUp", 0);
+	m_nMIDIButtonTGDown = m_Properties.GetNumber ("MIDIButtonTGDown", 0);
+	
 	m_bEncoderEnabled = m_Properties.GetNumber ("EncoderEnabled", 0) != 0;
 	m_nEncoderPinClock = m_Properties.GetNumber ("EncoderPinClock", 10);
 	m_nEncoderPinData = m_Properties.GetNumber ("EncoderPinData", 9);
@@ -124,6 +188,69 @@ void CConfig::Load (void)
 	m_bMIDIDumpEnabled  = m_Properties.GetNumber ("MIDIDumpEnabled", 0) != 0;
 	m_bProfileEnabled = m_Properties.GetNumber ("ProfileEnabled", 0) != 0;
 	m_bPerformanceSelectToLoad = m_Properties.GetNumber ("PerformanceSelectToLoad", 1) != 0;
+	m_bPerformanceSelectChannel = m_Properties.GetNumber ("PerformanceSelectChannel", 0);
+}
+
+unsigned CConfig::GetToneGenerators (void) const
+{
+	return m_nToneGenerators;
+}
+
+unsigned CConfig::GetPolyphony (void) const
+{
+	return m_nPolyphony;
+}
+
+unsigned CConfig::GetTGsCore1 (void) const
+{
+#ifndef ARM_ALLOW_MULTI_CORE
+	return 0;
+#else
+	if (m_nToneGenerators > MinToneGenerators)
+	{
+		return TGsCore1 + TGsCore1Opt;
+	}
+	else
+	{
+		return TGsCore1;
+	}
+#endif
+}
+
+unsigned CConfig::GetTGsCore23 (void) const
+{
+#ifndef ARM_ALLOW_MULTI_CORE
+	return 0;
+#else
+	if (m_nToneGenerators > MinToneGenerators)
+	{
+		return TGsCore23 + TGsCore23Opt;
+	}
+	else
+	{
+		return TGsCore23;
+	}
+#endif
+}
+
+bool CConfig::GetUSBGadget (void) const
+{
+	return m_bUSBGadget;
+}
+
+unsigned CConfig::GetUSBGadgetPin (void) const
+{
+	return m_nUSBGadgetPin;
+}
+
+bool CConfig::GetUSBGadgetMode (void) const
+{
+	return m_bUSBGadgetMode;
+}
+
+void CConfig::SetUSBGadgetMode (bool USBGadgetMode)
+{
+	m_bUSBGadgetMode = USBGadgetMode;
 }
 
 const char *CConfig::GetSoundDevice (void) const
@@ -149,6 +276,11 @@ unsigned CConfig::GetDACI2CAddress (void) const
 bool CConfig::GetChannelsSwapped (void) const
 {
 	return m_bChannelsSwapped;
+}
+
+unsigned CConfig::GetEngineType (void) const
+{
+	return m_EngineType;
 }
 
 unsigned CConfig::GetMIDIBaudRate (void) const
@@ -189,6 +321,11 @@ bool CConfig::GetHeaderlessSysExVoices (void) const
 bool CConfig::GetExpandPCAcrossBanks (void) const
 {
 	return m_bExpandPCAcrossBanks;
+}
+
+bool CConfig::GetQuadDAC8Chan (void) const
+{
+	return m_bQuadDAC8Chan;
 }
 
 bool CConfig::GetLCDEnabled (void) const
@@ -261,6 +398,65 @@ bool CConfig::GetSSD1306LCDMirror (void) const
 	return m_bSSD1306LCDMirror;
 }
 
+unsigned CConfig::GetSPIBus (void) const
+{
+	return m_nSPIBus;
+}
+
+unsigned CConfig::GetSPIMode (void) const
+{
+	return m_nSPIMode;
+}
+
+unsigned CConfig::GetSPIClockKHz (void) const
+{
+	return m_nSPIClockKHz;
+}
+
+bool CConfig::GetST7789Enabled (void) const
+{
+	return m_bST7789Enabled;
+}
+
+unsigned CConfig::GetST7789Data (void) const
+{
+	return m_nST7789Data;
+}
+
+unsigned CConfig::GetST7789Select (void) const
+{
+	return m_nST7789Select;
+}
+
+unsigned CConfig::GetST7789Reset (void) const
+{
+	return m_nST7789Reset;
+}
+
+unsigned CConfig::GetST7789Backlight (void) const
+{
+	return m_nST7789Backlight;
+}
+
+unsigned CConfig::GetST7789Width (void) const
+{
+	return m_nST7789Width;
+}
+
+unsigned CConfig::GetST7789Height (void) const
+{
+	return m_nST7789Height;
+}
+
+unsigned CConfig::GetST7789Rotation (void) const
+{
+	return m_nST7789Rotation;
+}
+
+bool CConfig::GetST7789SmallFont (void) const
+{
+	return m_bST7789SmallFont;
+}
 unsigned CConfig::GetLCDColumns (void) const
 {
 	return m_nLCDColumns;
@@ -336,6 +532,46 @@ unsigned CConfig::GetLongPressTimeout (void) const
 	return m_nLongPressTimeout;
 }
 
+unsigned CConfig::GetButtonPinPgmUp (void) const
+{
+	return m_nButtonPinPgmUp;
+}
+
+unsigned CConfig::GetButtonPinPgmDown (void) const
+{
+	return m_nButtonPinPgmDown;
+}
+
+unsigned CConfig::GetButtonPinTGUp (void) const
+{
+	return m_nButtonPinTGUp;
+}
+
+unsigned CConfig::GetButtonPinTGDown (void) const
+{
+	return m_nButtonPinTGDown;
+}
+
+const char *CConfig::GetButtonActionPgmUp (void) const
+{
+	return m_ButtonActionPgmUp.c_str();
+}
+
+const char *CConfig::GetButtonActionPgmDown (void) const
+{
+	return m_ButtonActionPgmDown.c_str();
+}
+
+const char *CConfig::GetButtonActionTGUp (void) const
+{
+	return m_ButtonActionTGUp.c_str();
+}
+
+const char *CConfig::GetButtonActionTGDown (void) const
+{
+	return m_ButtonActionTGDown.c_str();
+}
+
 unsigned CConfig::GetMIDIButtonCh (void) const
 {
 	return m_nMIDIButtonCh;
@@ -371,6 +607,26 @@ unsigned CConfig::GetMIDIButtonHome (void) const
 	return m_nMIDIButtonHome;
 }
 
+unsigned CConfig::GetMIDIButtonPgmUp (void) const
+{
+	return m_nMIDIButtonPgmUp;
+}
+
+unsigned CConfig::GetMIDIButtonPgmDown (void) const
+{
+	return m_nMIDIButtonPgmDown;
+}
+
+unsigned CConfig::GetMIDIButtonTGUp (void) const
+{
+	return m_nMIDIButtonTGUp;
+}
+
+unsigned CConfig::GetMIDIButtonTGDown (void) const
+{
+	return m_nMIDIButtonTGDown;
+}
+
 bool CConfig::GetEncoderEnabled (void) const
 {
 	return m_bEncoderEnabled;
@@ -399,4 +655,9 @@ bool CConfig::GetProfileEnabled (void) const
 bool CConfig::GetPerformanceSelectToLoad (void) const
 {
 	return m_bPerformanceSelectToLoad;
+}
+
+unsigned CConfig::GetPerformanceSelectChannel (void) const
+{
+	return m_bPerformanceSelectChannel;
 }

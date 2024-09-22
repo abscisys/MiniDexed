@@ -413,10 +413,10 @@ void AudioEffectPlateReverb::processSample(float32_t inL, float32_t inR, float32
     input = (float32_t)(lfo2_out_cos & LFO_FRAC_MASK) / ((float32_t)LFO_FRAC_MASK); // interp. k
 
     acc = (temp1*(1.0f-input) + temp2*input)* 0.8f;
-    #else
+#else
     temp16 = (lp_dly1_idx + lp_dly1_offset_R) %  (sizeof(lp_dly1_buf)/sizeof(float32_t));
     acc = lp_dly1_buf[temp16] * 0.8f;
-    #endif
+#endif
 #ifdef TAP2_MODULATED
     temp16 = (lp_dly2_idx + lp_dly2_offset_R + (lfo1_out_cos>>LFO_FRAC_BITS)) % (sizeof(lp_dly2_buf)/sizeof(float32_t));
     temp1 = lp_dly2_buf[temp16++];

@@ -37,6 +37,7 @@
 #include <circle/interrupt.h>
 #include <circle/gpiomanager.h>
 #include <circle/i2cmaster.h>
+#include <circle/spimaster.h>
 #include <circle/multicore.h>
 #include <circle/sound/soundbasedevice.h>
 #include <circle/spinlock.h>
@@ -48,64 +49,69 @@
 #if defined(MIXING_CONSOLE_ENABLE)
 #include "mixing_console.hpp"
 
-typedef MixingConsole<CConfig::ToneGenerators> Mixer;
+typedef MixingConsole<CConfig::AllToneGenerators> Mixer;
 #endif
 
 class CMiniDexed
 #ifdef ARM_ALLOW_MULTI_CORE
-:	public CMultiCoreSupport
+	:	public CMultiCoreSupport
 #endif
 {
 public:
 	CMiniDexed(
-		CConfig *pConfig, 
-		CInterruptSystem *pInterrupt,
-		CGPIOManager *pGPIOManager, 
-		CI2CMaster *pI2CMaster, 
-		FATFS *pFileSystem
-	);
+		CConfig* pConfig,
+		CInterruptSystem* pInterrupt,
+		CGPIOManager* pGPIOManager,
+		CI2CMaster* pI2CMaster,
+		CSPIMaster* pSPIMaster,
+		FATFS* pFileSystem);
 
-	bool Initialize (void);
+	bool Initialize(void);
 
-	void Process (bool bPlugAndPlayUpdated);
+	void Process(bool bPlugAndPlayUpdated);
 
 #ifdef ARM_ALLOW_MULTI_CORE
-	void Run (unsigned nCore);
+	void Run(unsigned nCore);
 #endif
 
-	CSysExFileLoader *GetSysExFileLoader (void);
+	CSysExFileLoader* GetSysExFileLoader(void);
+	CPerformanceConfig* GetPerformanceConfig(void);
 
-	void BankSelect    (unsigned nBank, unsigned nTG);
-	void BankSelectMSB (unsigned nBankMSB, unsigned nTG);
-	void BankSelectLSB (unsigned nBankLSB, unsigned nTG);
-	void ProgramChange (unsigned nProgram, unsigned nTG);
-	void SetVolume (unsigned nVolume, unsigned nTG);
-	void SetPan (unsigned nPan, unsigned nTG);			// 0 .. 127
-	void SetMasterTune (int nMasterTune, unsigned nTG);		// -99 .. 99
-	void SetCutoff (int nCutoff, unsigned nTG);			// 0 .. 99
-	void SetResonance (int nResonance, unsigned nTG);		// 0 .. 99
-	void SetMIDIChannel (uint8_t uchChannel, unsigned nTG);
+	void BankSelect(unsigned nBank, unsigned nTG);
+	void BankSelectPerformance(unsigned nBank);
+	void BankSelectMSB(unsigned nBankMSB, unsigned nTG);
+	void BankSelectMSBPerformance(unsigned nBankMSB);
+	void BankSelectLSB(unsigned nBankLSB, unsigned nTG);
+	void BankSelectLSBPerformance(unsigned nBankLSB);
+	void ProgramChange(unsigned nProgram, unsigned nTG);
+	void ProgramChangePerformance(unsigned nProgram);
+	void SetVolume(unsigned nVolume, unsigned nTG);
+	void SetPan(unsigned nPan, unsigned nTG);			// 0 .. 127
+	void SetMasterTune(int nMasterTune, unsigned nTG);		// -99 .. 99
+	void SetCutoff(int nCutoff, unsigned nTG);			// 0 .. 99
+	void SetResonance(int nResonance, unsigned nTG);		// 0 .. 99
+	void SetMIDIChannel(uint8_t uchChannel, unsigned nTG);
 
-	void keyup (int16_t pitch, unsigned nTG);
-	void keydown (int16_t pitch, uint8_t velocity, unsigned nTG);
+	void keyup(int16_t pitch, unsigned nTG);
+	void keydown(int16_t pitch, uint8_t velocity, unsigned nTG);
 
-	void setSustain (bool sustain, unsigned nTG);
-	void panic (uint8_t value, unsigned nTG);
-	void notesOff (uint8_t value, unsigned nTG);
-	void setModWheel (uint8_t value, unsigned nTG);
-	void setPitchbend (int16_t value, unsigned nTG);
-	void ControllersRefresh (unsigned nTG);
+	void setSustain(bool sustain, unsigned nTG);
+	void panic(uint8_t value, unsigned nTG);
+	void notesOff(uint8_t value, unsigned nTG);
+	void setModWheel(uint8_t value, unsigned nTG);
+	void setPitchbend(int16_t value, unsigned nTG);
+	void ControllersRefresh(unsigned nTG);
 
-	void setFootController (uint8_t value, unsigned nTG);
-	void setBreathController (uint8_t value, unsigned nTG);
-	void setAftertouch (uint8_t value, unsigned nTG);
+	void setFootController(uint8_t value, unsigned nTG);
+	void setBreathController(uint8_t value, unsigned nTG);
+	void setAftertouch(uint8_t value, unsigned nTG);
 
 #if defined(MIXING_CONSOLE_ENABLE)
 	unsigned getMixingConsoleSendLevel(unsigned nTG, MixerOutput fx) const;
 	void setMixingConsoleSendLevel(unsigned nTG, MixerOutput fx, unsigned nFXSend);
 	void setMixingConsoleFXSendLevel(MixerOutput fromFX, MixerOutput toFX, unsigned nFXReturn);
 #elif defined(PLATE_REVERB_ENABLE)
-	void SetReverbSend (unsigned nReverbSend, unsigned nTG);			// 0 .. 127
+	void SetReverbSend(unsigned nReverbSend, unsigned nTG);			// 0 .. 127
 #endif
 
 	void setMonoMode(uint8_t mono, uint8_t nTG);
@@ -126,24 +132,36 @@ public:
 	void setVoiceDataElement(uint8_t data, uint8_t number, uint8_t nTG);
 	void getSysExVoiceDump(uint8_t* dest, uint8_t nTG);
 
-	void setModController (unsigned controller, unsigned parameter, uint8_t value, uint8_t nTG);
-	unsigned getModController (unsigned controller, unsigned parameter, uint8_t nTG);
+	void setModController(unsigned controller, unsigned parameter, uint8_t value, uint8_t nTG);
+	unsigned getModController(unsigned controller, unsigned parameter, uint8_t nTG);
 
 	int16_t checkSystemExclusive(const uint8_t* pMessage, const uint16_t nLength, uint8_t nTG);
 
 	std::string GetPerformanceFileName(unsigned nID);
 	std::string GetPerformanceName(unsigned nID);
 	unsigned GetLastPerformance();
+	unsigned GetPerformanceBank();
+	unsigned GetLastPerformanceBank();
 	unsigned GetActualPerformanceID();
 	void SetActualPerformanceID(unsigned nID);
+	unsigned GetActualPerformanceBankID();
+	void SetActualPerformanceBankID(unsigned nBankID);
 	bool SetNewPerformance(unsigned nID);
-	bool SavePerformanceNewFile ();
-	
-	bool DoSavePerformanceNewFile (void);
-	bool DoSetNewPerformance (void);
+	bool SetNewPerformanceBank(unsigned nBankID);
+	void SetFirstPerformance(void);
+	void DoSetFirstPerformance(void);
+	bool SavePerformanceNewFile();
+
+	bool DoSavePerformanceNewFile(void);
+	bool DoSetNewPerformance(void);
+	bool DoSetNewPerformanceBank(void);
 	bool GetPerformanceSelectToLoad(void);
-	bool SavePerformance (bool bSaveAsDeault);
-	
+	bool SavePerformance(bool bSaveAsDeault);
+	unsigned GetPerformanceSelectChannel(void);
+	void SetPerformanceSelectChannel(unsigned uCh);
+	bool IsValidPerformance(unsigned nID);
+	bool IsValidPerformanceBank(unsigned nBankID);
+
 	// Must match the order in CUIMenu::TParameter
 	enum TParameter
 	{
@@ -171,7 +189,7 @@ public:
 		ParameterFXChorusEnable,
 		ParameterFXChorusRate,
 		ParameterFXChorusDepth,
-		
+
 		// Flanger parameters
 		ParameterFXFlangerEnable,
 		ParameterFXFlangerRate,
@@ -285,19 +303,20 @@ public:
 
 		// Bypass FX
 		ParameterFXBypass,
-
 	#endif
 	// END FX global parameters definition
 
+		ParameterPerformanceSelectChannel,
+		ParameterPerformanceBank,
 		ParameterUnknown
 	};
 
-	void SetParameter (TParameter Parameter, int nValue);
-	int GetParameter (TParameter Parameter);
+	void SetParameter(TParameter Parameter, int nValue);
+	int GetParameter(TParameter Parameter);
 
 	std::string GetNewPerformanceDefaultName(void);
 	void SetNewPerformanceName(std::string nName);
-	void SetVoiceName (std::string VoiceName, unsigned nTG);
+	void SetVoiceName(std::string VoiceName, unsigned nTG);
 	bool DeletePerformance(unsigned nID);
 	bool DoDeletePerformance(void);
 
@@ -314,37 +333,37 @@ public:
 		TGParameterCutoff,
 		TGParameterResonance,
 		TGParameterMIDIChannel,
-#if defined(PLATE_REVERB_ENABLE)
+	#if defined(PLATE_REVERB_ENABLE)
 		TGParameterReverbSend,
-#endif
-		TGParameterPitchBendRange, 
+	#endif
+		TGParameterPitchBendRange,
 		TGParameterPitchBendStep,
 		TGParameterPortamentoMode,
 		TGParameterPortamentoGlissando,
 		TGParameterPortamentoTime,
-		TGParameterMonoMode,  
-				
+		TGParameterMonoMode,
+
 		TGParameterMWRange,
 		TGParameterMWPitch,
 		TGParameterMWAmplitude,
 		TGParameterMWEGBias,
-		
+
 		TGParameterFCRange,
 		TGParameterFCPitch,
 		TGParameterFCAmplitude,
 		TGParameterFCEGBias,
-		
+
 		TGParameterBCRange,
 		TGParameterBCPitch,
 		TGParameterBCAmplitude,
 		TGParameterBCEGBias,
-		
+
 		TGParameterATRange,
 		TGParameterATPitch,
 		TGParameterATAmplitude,
 		TGParameterATEGBias,
-		
-#if defined(MIXING_CONSOLE_ENABLE)
+
+	#if defined(MIXING_CONSOLE_ENABLE)
 		TGParameterMixingSendFXTube,
 		TGParameterMixingSendFXChorus,
 		TGParameterMixingSendFXFlanger,
@@ -354,33 +373,33 @@ public:
 		TGParameterMixingSendFXPlateReverb,
 		TGParameterMixingSendFXReverberator,
 		TGParameterMixingSendFXMainOutput,
-#endif // MIXING_CONSOLE_ENABLE
+	#endif // MIXING_CONSOLE_ENABLE
 
 		TGParameterUnknown
 	};
 
-	void SetTGParameter (TTGParameter Parameter, int nValue, unsigned nTG);
-	int GetTGParameter (TTGParameter Parameter, unsigned nTG);
+	void SetTGParameter(TTGParameter Parameter, int nValue, unsigned nTG);
+	int GetTGParameter(TTGParameter Parameter, unsigned nTG);
 
 	// access (global or OP-related) parameter of the active voice of a TG
 	static const unsigned NoOP = 6;		// for global parameters
-	void SetVoiceParameter (uint8_t uchOffset, uint8_t uchValue, unsigned nOP, unsigned nTG);
-	uint8_t GetVoiceParameter (uint8_t uchOffset, unsigned nOP, unsigned nTG);
+	void SetVoiceParameter(uint8_t uchOffset, uint8_t uchValue, unsigned nOP, unsigned nTG);
+	uint8_t GetVoiceParameter(uint8_t uchOffset, unsigned nOP, unsigned nTG);
 
-	std::string GetVoiceName (unsigned nTG);
+	std::string GetVoiceName(unsigned nTG);
 
-	bool SavePerformance (void);
-	bool DoSavePerformance (void);
+	bool SavePerformance(void);
+	bool DoSavePerformance(void);
 
-	void setMasterVolume (float32_t vol);
+	void setMasterVolume(float32_t vol);
 
-private:
-	int16_t ApplyNoteLimits (int16_t pitch, unsigned nTG);	// returns < 0 to ignore note
-	uint8_t m_uchOPMask[CConfig::ToneGenerators];
-	void LoadPerformanceParameters(void); 
-	void ProcessSound (void);
+	private:
+	int16_t ApplyNoteLimits(int16_t pitch, unsigned nTG);	// returns < 0 to ignore note
+	uint8_t m_uchOPMask[CConfig::AllToneGenerators];
+	void LoadPerformanceParameters(void);
+	void ProcessSound(void);
 
-#ifdef ARM_ALLOW_MULTI_CORE
+	#ifdef ARM_ALLOW_MULTI_CORE
 	enum TCoreStatus
 	{
 		CoreStatusInit,
@@ -389,97 +408,106 @@ private:
 		CoreStatusExit,
 		CoreStatusUnknown
 	};
-#endif
+	#endif
 
 private:
-	CConfig *m_pConfig;
+	CConfig* m_pConfig;
 
 	int m_nParameter[ParameterUnknown];			// global (non-TG) parameters
 
-	CDexedAdapter *m_pTG[CConfig::ToneGenerators];
+	unsigned m_nToneGenerators;
+	unsigned m_nPolyphony;
 
-	unsigned m_nVoiceBankID[CConfig::ToneGenerators];
-	unsigned m_nVoiceBankIDMSB[CConfig::ToneGenerators];
-	unsigned m_nProgram[CConfig::ToneGenerators];
-	unsigned m_nVolume[CConfig::ToneGenerators];
-	unsigned m_nPan[CConfig::ToneGenerators];
-	int m_nMasterTune[CConfig::ToneGenerators];
-	int m_nCutoff[CConfig::ToneGenerators];
-	int m_nResonance[CConfig::ToneGenerators];
-	unsigned m_nMIDIChannel[CConfig::ToneGenerators];
-	unsigned m_nPitchBendRange[CConfig::ToneGenerators];	
-	unsigned m_nPitchBendStep[CConfig::ToneGenerators];	
-	unsigned m_nPortamentoMode[CConfig::ToneGenerators];	
-	unsigned m_nPortamentoGlissando[CConfig::ToneGenerators];	
-	unsigned m_nPortamentoTime[CConfig::ToneGenerators];	
-	bool m_bMonoMode[CConfig::ToneGenerators]; 
-				
-	unsigned m_nModulationWheelRange[CConfig::ToneGenerators];
-	unsigned m_nModulationWheelTarget[CConfig::ToneGenerators];
-	unsigned m_nFootControlRange[CConfig::ToneGenerators];
-	unsigned m_nFootControlTarget[CConfig::ToneGenerators];
-	unsigned m_nBreathControlRange[CConfig::ToneGenerators];	
-	unsigned m_nBreathControlTarget[CConfig::ToneGenerators];	
-	unsigned m_nAftertouchRange[CConfig::ToneGenerators];	
-	unsigned m_nAftertouchTarget[CConfig::ToneGenerators];
-		
-	unsigned m_nNoteLimitLow[CConfig::ToneGenerators];
-	unsigned m_nNoteLimitHigh[CConfig::ToneGenerators];
-	int m_nNoteShift[CConfig::ToneGenerators];
+	CDexedAdapter* m_pTG[CConfig::AllToneGenerators];
+
+	unsigned m_nVoiceBankID[CConfig::AllToneGenerators];
+	unsigned m_nVoiceBankIDMSB[CConfig::AllToneGenerators];
+	unsigned m_nVoiceBankIDPerformance;
+	unsigned m_nVoiceBankIDMSBPerformance;
+	unsigned m_nProgram[CConfig::AllToneGenerators];
+	unsigned m_nVolume[CConfig::AllToneGenerators];
+	unsigned m_nPan[CConfig::AllToneGenerators];
+	int m_nMasterTune[CConfig::AllToneGenerators];
+	int m_nCutoff[CConfig::AllToneGenerators];
+	int m_nResonance[CConfig::AllToneGenerators];
+	unsigned m_nMIDIChannel[CConfig::AllToneGenerators];
+	unsigned m_nPitchBendRange[CConfig::AllToneGenerators];
+	unsigned m_nPitchBendStep[CConfig::AllToneGenerators];
+	unsigned m_nPortamentoMode[CConfig::AllToneGenerators];
+	unsigned m_nPortamentoGlissando[CConfig::AllToneGenerators];
+	unsigned m_nPortamentoTime[CConfig::AllToneGenerators];
+	bool m_bMonoMode[CConfig::AllToneGenerators];
+
+	unsigned m_nModulationWheelRange[CConfig::AllToneGenerators];
+	unsigned m_nModulationWheelTarget[CConfig::AllToneGenerators];
+	unsigned m_nFootControlRange[CConfig::AllToneGenerators];
+	unsigned m_nFootControlTarget[CConfig::AllToneGenerators];
+	unsigned m_nBreathControlRange[CConfig::AllToneGenerators];
+	unsigned m_nBreathControlTarget[CConfig::AllToneGenerators];
+	unsigned m_nAftertouchRange[CConfig::AllToneGenerators];
+	unsigned m_nAftertouchTarget[CConfig::AllToneGenerators];
+
+	unsigned m_nNoteLimitLow[CConfig::AllToneGenerators];
+	unsigned m_nNoteLimitHigh[CConfig::AllToneGenerators];
+	int m_nNoteShift[CConfig::AllToneGenerators];
 
 #ifdef MIXING_CONSOLE_ENABLE
-	unsigned m_nTGSendLevel[CConfig::ToneGenerators][MixerOutput::kFXCount];
+	unsigned m_nTGSendLevel[CConfig::AllToneGenerators][MixerOutput::kFXCount];
 	unsigned m_nFXSendLevel[MixerOutput::kFXCount - 1][MixerOutput::kFXCount];
 #elif defined(PLATE_REVERB_ENABLE)
-	unsigned m_nReverbSend[CConfig::ToneGenerators];
+	unsigned m_nReverbSend[CConfig::AllToneGenerators];
 #endif
 
-	uint8_t m_nRawVoiceData[156]; 
-	
-	
+	uint8_t m_nRawVoiceData[156];
+
+
 	float32_t nMasterVolume;
 
 	CUserInterface m_UI;
 	CSysExFileLoader m_SysExFileLoader;
 	CPerformanceConfig m_PerformanceConfig;
 
-	CMIDIKeyboard *m_pMIDIKeyboard[CConfig::MaxUSBMIDIDevices];
+	CMIDIKeyboard* m_pMIDIKeyboard[CConfig::MaxUSBMIDIDevices];
 	CPCKeyboard m_PCKeyboard;
 	CSerialMIDIDevice m_SerialMIDI;
 	bool m_bUseSerial;
+	bool m_bQuadDAC8Chan;
 
-	CSoundBaseDevice *m_pSoundDevice;
+	CSoundBaseDevice* m_pSoundDevice;
 	bool m_bChannelsSwapped;
 	unsigned m_nQueueSizeFrames;
 
 #ifdef ARM_ALLOW_MULTI_CORE
-	unsigned m_nActiveTGsLog2;
+	//	unsigned m_nActiveTGsLog2;
 	volatile TCoreStatus m_CoreStatus[CORES];
 	volatile unsigned m_nFramesToProcess;
-	float32_t m_OutputLevel[CConfig::ToneGenerators][CConfig::MaxChunkSize];
+	float32_t m_OutputLevel[CConfig::AllToneGenerators][CConfig::MaxChunkSize];
 #endif
 
 	CPerformanceTimer m_GetChunkTimer;
 	bool m_bProfileEnabled;
 
 #if defined(MIXING_CONSOLE_ENABLE)
-	Mixer* mixing_console_;
+	Mixer* m_pMixingConsole;
 #elif defined(PLATE_REVERB_ENABLE)
 	AudioEffectPlateReverb* reverb;
-	AudioStereoMixer<CConfig::ToneGenerators>* tg_mixer;
-	AudioStereoMixer<CConfig::ToneGenerators>* reverb_send_mixer;
+	AudioStereoMixer<CConfig::AllToneGenerators>* tg_mixer;
+	AudioStereoMixer<CConfig::AllToneGenerators>* reverb_send_mixer;
 #endif
 
 	CSpinLock m_FXSpinLock;
 
-
 	bool m_bSavePerformance;
 	bool m_bSavePerformanceNewFile;
 	bool m_bSetNewPerformance;
-	unsigned m_nSetNewPerformanceID;	
-	bool	m_bDeletePerformance;
+	unsigned m_nSetNewPerformanceID;
+	bool m_bSetNewPerformanceBank;
+	unsigned m_nSetNewPerformanceBankID;
+	bool m_bSetFirstPerformance;
+	bool m_bDeletePerformance;
 	unsigned m_nDeletePerformanceID;
 	bool m_bLoadPerformanceBusy;
+	bool m_bLoadPerformanceBankBusy;
 	bool m_bSaveAsDeault;
 };
 

@@ -1,0 +1,30 @@
+{
+    "configurations": [
+        {
+            "name": "ARM-GCC",
+            "defines": [
+                "RPI=4",
+                "RASPPI=4",
+                "MIXING_CONSOLE_ENABLE",
+                "ARM_ALLOW_MULTI_CORE"
+            ],
+            "includePath": [
+                "${workspaceFolder}/Synth_Dexed/src",
+                "${workspaceFolder}/CMSIS_5/CMSIS/Core/Include",
+                "${workspaceFolder}/CMSIS_5/CMSIS/DSP/Include",
+                "${workspaceFolder}/CMSIS_5/CMSIS/DSP/PrivateInclude",
+                "${workspaceFolder}/CMSIS_5/CMSIS/DSP/ComputeLibrary/Include",
+                "${workspaceFolder}/circle-stdlib/include",
+                "${workspaceFolder}/circle-stdlib/libs",
+                "${workspaceFolder}/circle-stdlib/libs/circle/include",
+                "${workspaceFolder}/circle-stdlib/libs/circle/addon",
+                "${workspaceFolder}/include"
+            ],
+            "intelliSenseMode": "linux-clang-arm",
+            "compilerPath": "${workspaceFolder}/gcc-arm-10.3-2021.07-x86_64-aarch64-none-elf/bin/aarch64-none-elf-c++",
+            "cStandard": "c17",
+            "cppStandard": "c++17"
+        }
+    ],
+    "version": 4
+}

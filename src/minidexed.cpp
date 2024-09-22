@@ -28,42 +28,51 @@
 #include <stdio.h>
 #include <assert.h>
 
-LOGMODULE ("minidexed");
+#include "minilog.hpp"
 
-CMiniDexed::CMiniDexed (	
-	CConfig *pConfig, 
-	CInterruptSystem *pInterrupt,
-	CGPIOManager *pGPIOManager, 
-	CI2CMaster *pI2CMaster, 
-	FATFS *pFileSystem
-) :
+LOGMODULE("minidexed");
+
+CMiniDexed::CMiniDexed(
+	CConfig* pConfig,
+	CInterruptSystem* pInterrupt,
+	CGPIOManager* pGPIOManager,
+	CI2CMaster* pI2CMaster,
+	CSPIMaster* pSPIMaster,
+	FATFS* pFileSystem):
 #ifdef ARM_ALLOW_MULTI_CORE
-	CMultiCoreSupport (CMemorySystem::Get ()),
+	CMultiCoreSupport(CMemorySystem::Get()),
 #endif
-	m_pConfig (pConfig),
-	m_UI (this, pGPIOManager, pI2CMaster, pConfig),
-	m_PerformanceConfig (pFileSystem),
-	m_PCKeyboard (this, pConfig, &m_UI),
-	m_SerialMIDI (this, pInterrupt, pConfig, &m_UI),
-	m_bUseSerial (false),
-	m_pSoundDevice (0),
-	m_bChannelsSwapped (pConfig->GetChannelsSwapped ()),
+	m_pConfig(pConfig),
+	m_UI(this, pGPIOManager, pI2CMaster, pSPIMaster, pConfig),
+	m_PerformanceConfig(pFileSystem),
+	m_PCKeyboard(this, pConfig, &m_UI),
+	m_SerialMIDI(this, pInterrupt, pConfig, &m_UI),
+	m_bUseSerial(false),
+	m_bQuadDAC8Chan(false),
+	m_pSoundDevice(0),
+	m_bChannelsSwapped(pConfig->GetChannelsSwapped()),
 #ifdef ARM_ALLOW_MULTI_CORE
-	m_nActiveTGsLog2 (0),
+	//	m_nActiveTGsLog2(0),
 #endif
-							 
-							 
-	m_GetChunkTimer ("GetChunk", 1000000U * pConfig->GetChunkSize ()/2 / pConfig->GetSampleRate ()),
-	m_bProfileEnabled (m_pConfig->GetProfileEnabled ()),
-	m_bSavePerformance (false),
-	m_bSavePerformanceNewFile (false),
-	m_bSetNewPerformance (false),
-	m_bDeletePerformance (false),
-	m_bLoadPerformanceBusy(false)
+	m_GetChunkTimer("GetChunk", 1000000U * pConfig->GetChunkSize() / 2 / pConfig->GetSampleRate()),
+	m_bProfileEnabled(m_pConfig->GetProfileEnabled()),
+	m_bSavePerformance(false),
+	m_bSavePerformanceNewFile(false),
+	m_bSetNewPerformance(false),
+	m_bSetNewPerformanceBank(false),
+	m_bSetFirstPerformance(false),
+	m_bDeletePerformance(false),
+	m_bLoadPerformanceBusy(false),
+	m_bLoadPerformanceBankBusy(false)
 {
-	assert (m_pConfig);
+	assert(m_pConfig);
 
-	for (unsigned i = 0; i < CConfig::ToneGenerators; i++)
+	m_nToneGenerators = m_pConfig->GetToneGenerators();
+	m_nPolyphony = m_pConfig->GetPolyphony();
+	LOGNOTE("Tone Generators=%d, Polyphony=%d", m_nToneGenerators, m_nPolyphony);
+	MiniLog::Log("Tone Generators=%d, Polyphony=%d", m_nToneGenerators, m_nPolyphony);
+
+	for(unsigned i = 0; i < CConfig::AllToneGenerators; i++)
 	{
 		m_nVoiceBankID[i] = 0;
 		m_nVoiceBankIDMSB[i] = 0;
@@ -79,27 +88,17 @@ CMiniDexed::CMiniDexed (
 		m_nPortamentoMode[i] = 0;
 		m_nPortamentoGlissando[i] = 0;
 		m_nPortamentoTime[i] = 0;
-		m_bMonoMode[i]=0; 
+		m_bMonoMode[i] = 0;
 		m_nNoteLimitLow[i] = 0;
 		m_nNoteLimitHigh[i] = 127;
 		m_nNoteShift[i] = 0;
-		
-								
-								
-							
-							 
-							   
-							   
-							
-						   
-  
 		m_nModulationWheelRange[i] = 99;
 		m_nModulationWheelTarget[i] = 7;
 		m_nFootControlRange[i] = 99;
-		m_nFootControlTarget[i] = 0;	
-		m_nBreathControlRange[i] = 99;	
-		m_nBreathControlTarget[i] = 0;	
-		m_nAftertouchRange[i] = 99;	
+		m_nFootControlTarget[i] = 0;
+		m_nBreathControlRange[i] = 99;
+		m_nBreathControlTarget[i] = 0;
+		m_nAftertouchRange[i] = 99;
 		m_nAftertouchTarget[i] = 0;
 
 #if defined(MIXING_CONSOLE_ENABLE)
@@ -107,62 +106,134 @@ CMiniDexed::CMiniDexed (
 #elif defined(PLATE_REVERB_ENABLE)
 		m_nReverbSend[i] = 0;
 #endif
-		m_uchOPMask[i] = 0b111111;	// All operators on
 
-		m_pTG[i] = new CDexedAdapter (CConfig::MaxNotes, pConfig->GetSampleRate ());
-		assert (m_pTG[i]);
+		// Active the required number of active TGs
+		if(i < m_nToneGenerators)
+		{
+			m_uchOPMask[i] = 0b111111;	// All operators on
 
-		m_pTG[i]->activate ();
+			m_pTG[i] = new CDexedAdapter(m_nPolyphony, pConfig->GetSampleRate());
+			assert(m_pTG[i]);
+
+			m_pTG[i]->setEngineType(pConfig->GetEngineType());
+			m_pTG[i]->activate();
+		}
 	}
 
-#if defined(MIXING_CONSOLE_ENABLE)
-	for(size_t i = MixerOutput::FX_Tube; i < (MixerOutput::kFXCount - 1); ++i)
+	unsigned nUSBGadgetPin = pConfig->GetUSBGadgetPin();
+	bool bUSBGadget = pConfig->GetUSBGadget();
+	bool bUSBGadgetMode = pConfig->GetUSBGadgetMode();
+
+	if(bUSBGadgetMode)
 	{
-		memset(this->m_nFXSendLevel[i], 0, MixerOutput::kFXCount * sizeof(unsigned));
-	}
-
-	this->m_nTGSendLevel[0][MixerOutput::MainOutput] = 99;
-	this->m_nTGSendLevel[0][MixerOutput::FX_PlateReverb] = 99;
-	this->m_nFXSendLevel[MixerOutput::FX_PlateReverb][MixerOutput::MainOutput] = 99;
+#if RASPPI==5
+		LOGNOTE("USB Gadget (Device) Mode NOT supported on RPI 5");
+#else
+		if(nUSBGadgetPin == 0)
+		{
+			LOGNOTE("USB In Gadget (Device) Mode");
+		}
+		else
+		{
+			LOGNOTE("USB In Gadget (Device) Mode [USBGadgetPin %d = LOW]", nUSBGadgetPin);
+		}
 #endif
-
-	for (unsigned i = 0; i < CConfig::MaxUSBMIDIDevices; i++)
+	}
+	else
 	{
-		m_pMIDIKeyboard[i] = new CMIDIKeyboard (this, pConfig, &m_UI, i);
-		assert (m_pMIDIKeyboard[i]);
+		if(bUSBGadget)
+		{
+			if(nUSBGadgetPin == 0)
+			{
+				// This shouldn't be possible...
+				LOGNOTE("USB State Unknown");
+			}
+			else
+			{
+				LOGNOTE("USB In Host Mode [USBGadgetPin %d = HIGH]", nUSBGadgetPin);
+			}
+		}
+		else
+		{
+			LOGNOTE("USB In Host Mode");
+		}
+	}
+
+	for(unsigned i = 0; i < CConfig::MaxUSBMIDIDevices; i++)
+	{
+		m_pMIDIKeyboard[i] = new CMIDIKeyboard(this, pConfig, &m_UI, i);
+		assert(m_pMIDIKeyboard[i]);
 	}
 
 	// select the sound device
-	const char *pDeviceName = pConfig->GetSoundDevice ();
-	if (strcmp (pDeviceName, "i2s") == 0)
+	const char* pDeviceName = pConfig->GetSoundDevice();
+	if(strcmp(pDeviceName, "i2s") == 0)
 	{
-		LOGNOTE ("I2S mode");
-
-		m_pSoundDevice = new CI2SSoundBaseDevice (pInterrupt, pConfig->GetSampleRate (),
-							  pConfig->GetChunkSize (), false,
-							  pI2CMaster, pConfig->GetDACI2CAddress ());
+		LOGNOTE("I2S mode");
+#if RASPPI==5
+		// Quad DAC 8-channel mono only an option for RPI 5
+		m_bQuadDAC8Chan = pConfig->GetQuadDAC8Chan();
+#endif
+		if(m_bQuadDAC8Chan && (m_nToneGenerators != 8))
+		{
+			LOGNOTE("ERROR: Quad DAC Mode is only valid when number of TGs = 8.  Defaulting to non-Quad DAC mode,");
+			m_bQuadDAC8Chan = false;
+		}
+		if(m_bQuadDAC8Chan)
+		{
+			LOGNOTE("Configured for Quad DAC 8-channel Mono audio");
+			m_pSoundDevice = new CI2SSoundBaseDevice(
+				pInterrupt,
+				pConfig->GetSampleRate(),
+				pConfig->GetChunkSize(),
+				false,
+				pI2CMaster,
+				pConfig->GetDACI2CAddress(),
+				CI2SSoundBaseDevice::DeviceModeTXOnly,
+				8);  // 8 channels - L+R x4 across 4 I2S lanes
+		}
+		else
+		{
+			m_pSoundDevice = new CI2SSoundBaseDevice(
+				pInterrupt,
+				pConfig->GetSampleRate(),
+				pConfig->GetChunkSize(),
+				false,
+				pI2CMaster,
+				pConfig->GetDACI2CAddress(),
+				CI2SSoundBaseDevice::DeviceModeTXOnly,
+				2);  // 2 channels - L+R
+		}
 	}
-	else if (strcmp (pDeviceName, "hdmi") == 0)
+	else if(strcmp(pDeviceName, "hdmi") == 0)
 	{
-		LOGNOTE ("HDMI mode");
+#if RASPPI==5
+		LOGNOTE("HDMI mode NOT supported on RPI 5.");
+#else
+		LOGNOTE("HDMI mode");
 
-		m_pSoundDevice = new CHDMISoundBaseDevice (pInterrupt, pConfig->GetSampleRate (),
-							   pConfig->GetChunkSize ());
+		m_pSoundDevice = new CHDMISoundBaseDevice(
+			pInterrupt,
+			pConfig->GetSampleRate(),
+			pConfig->GetChunkSize());
 
 		// The channels are swapped by default in the HDMI sound driver.
 		// TODO: Remove this line, when this has been fixed in the driver.
 		m_bChannelsSwapped = !m_bChannelsSwapped;
+#endif
 	}
 	else
 	{
-		LOGNOTE ("PWM mode");
+		LOGNOTE("PWM mode");
 
-		m_pSoundDevice = new CPWMSoundBaseDevice (pInterrupt, pConfig->GetSampleRate (),
-							  pConfig->GetChunkSize ());
+		m_pSoundDevice = new CPWMSoundBaseDevice(
+			pInterrupt,
+			pConfig->GetSampleRate(),
+			pConfig->GetChunkSize());
 	}
 
 #ifdef ARM_ALLOW_MULTI_CORE
-	for (unsigned nCore = 0; nCore < CORES; nCore++)
+	for(unsigned nCore = 0; nCore < CORES; nCore++)
 	{
 		m_CoreStatus[nCore] = CoreStatusInit;
 	}
@@ -171,11 +242,11 @@ CMiniDexed::CMiniDexed (
 	this->setMasterVolume(1.0);
 
 #if defined(MIXING_CONSOLE_ENABLE)
-	this->mixing_console_ = new Mixer(static_cast<float32_t>(pConfig->GetSampleRate()), CConfig::MaxChunkSize, this->m_bChannelsSwapped);
-	for (uint8_t i = 0; i < CConfig::ToneGenerators; i++)
+	this->m_pMixingConsole = new Mixer(static_cast<float32_t>(pConfig->GetSampleRate()), CConfig::MaxChunkSize, this->m_bChannelsSwapped);
+	for(uint8_t i = 0; i < CConfig::AllToneGenerators; i++)
 	{
 		memset(this->m_OutputLevel[i], 0, CConfig::MaxChunkSize * sizeof(float32_t));
-		this->mixing_console_->setInputSampleBuffer(i, this->m_OutputLevel[i]);
+		this->m_pMixingConsole->setInputSampleBuffer(i, this->m_OutputLevel[i]);
 	}
 
 	// Tube parameters
@@ -186,7 +257,7 @@ CMiniDexed::CMiniDexed (
 	this->SetParameter(TParameter::ParameterFXChorusEnable, 1);
 	this->SetParameter(TParameter::ParameterFXChorusRate, 50);
 	this->SetParameter(TParameter::ParameterFXChorusDepth, 50);
-	
+
 	// Flanger parameters
 	this->SetParameter(TParameter::ParameterFXFlangerEnable, 1);
 	this->SetParameter(TParameter::ParameterFXFlangerRate, 3);
@@ -233,116 +304,146 @@ CMiniDexed::CMiniDexed (
 #elif defined(PLATE_REVERB_ENABLE)
 
 	// BEGIN setup tg_mixer
-	tg_mixer = new AudioStereoMixer<CConfig::ToneGenerators>(pConfig->GetChunkSize()/2);
+	tg_mixer = new AudioStereoMixer<CConfig::AllToneGenerators>(pConfig->GetChunkSize() / 2);
 	// END setup tgmixer
 
 	// BEGIN setup reverb
-	reverb_send_mixer = new AudioStereoMixer<CConfig::ToneGenerators>(pConfig->GetChunkSize()/2);
+	reverb_send_mixer = new AudioStereoMixer<CConfig::AllToneGenerators>(pConfig->GetChunkSize() / 2);
 	reverb = new AudioEffectPlateReverb(pConfig->GetSampleRate());
-	SetParameter (TParameter::ParameterReverbEnable, 1);
-	SetParameter (TParameter::ParameterReverbSize, 70);
-	SetParameter (TParameter::ParameterReverbHighDamp, 50);
-	SetParameter (TParameter::ParameterReverbLowDamp, 50);
-	SetParameter (TParameter::ParameterReverbLowPass, 30);
-	SetParameter (TParameter::ParameterReverbDiffusion, 65);
-	SetParameter (TParameter::ParameterReverbLevel, 99);
+	SetParameter(TParameter::ParameterReverbEnable, 1);
+	SetParameter(TParameter::ParameterReverbSize, 70);
+	SetParameter(TParameter::ParameterReverbHighDamp, 50);
+	SetParameter(TParameter::ParameterReverbLowDamp, 50);
+	SetParameter(TParameter::ParameterReverbLowPass, 30);
+	SetParameter(TParameter::ParameterReverbDiffusion, 65);
+	SetParameter(TParameter::ParameterReverbLevel, 99);
 	// END setup reverb
 
 #endif
 
-	this->SetParameter (TParameter::ParameterCompressorEnable, 1);
+	SetParameter(ParameterCompressorEnable, 1);
+
+	SetPerformanceSelectChannel(m_pConfig->GetPerformanceSelectChannel());
+
+	SetParameter(ParameterPerformanceBank, 0);
 };
 
-bool CMiniDexed::Initialize (void)
+bool CMiniDexed::Initialize(void)
 {
-	assert (m_pConfig);
-	assert (m_pSoundDevice);
+	assert(m_pConfig);
+	assert(m_pSoundDevice);
 
-	if (!m_UI.Initialize ())
+	if(!m_UI.Initialize())
 	{
 		return false;
 	}
 
-	m_SysExFileLoader.Load (m_pConfig->GetHeaderlessSysExVoices ());
+	m_SysExFileLoader.Load(m_pConfig->GetHeaderlessSysExVoices());
 
-	if (m_SerialMIDI.Initialize ())
+	if(m_SerialMIDI.Initialize())
 	{
-		LOGNOTE ("Serial MIDI interface enabled");
+		LOGNOTE("Serial MIDI interface enabled");
 
 		m_bUseSerial = true;
 	}
 
-	for (unsigned i = 0; i < CConfig::ToneGenerators; i++)
+	if(m_pConfig->GetMIDIRXProgramChange())
 	{
-		assert (m_pTG[i]);
-
-		SetVolume (100, i);
-		ProgramChange (0, i);
-
-		m_pTG[i]->setTranspose (24);
-
-		m_pTG[i]->setPBController (2, 0);
-		m_pTG[i]->setMWController (99, 1, 0); 
-
-		m_pTG[i]->setFCController (99, 1, 0); 
-		m_pTG[i]->setBCController (99, 1, 0);
-		m_pTG[i]->setATController (99, 1, 0);
-		
-#if defined(MIXING_CONSOLE_ENABLE)
-		this->mixing_console_->reset();
-		this->mixing_console_->setPan(i, this->m_nPan[i] / 127.0f);
-
-		this->mixing_console_->setSendLevel(i, MixerOutput::FX_PlateReverb, this->m_nTGSendLevel[i][MixerOutput::FX_PlateReverb] / 99.0f);
-		this->mixing_console_->setSendLevel(i, MixerOutput::MainOutput, this->m_nTGSendLevel[i][MixerOutput::MainOutput] / 99.0f);
-		this->mixing_console_->setFXSendLevel(MixerOutput::FX_PlateReverb, MixerOutput::MainOutput, this->m_nFXSendLevel[MixerOutput::FX_PlateReverb][MixerOutput::FX_PlateReverb] / 99.0f);
-
-#elif defined(PLATE_REVERB_ENABLE)
-
-		tg_mixer->pan(i,mapfloat(m_nPan[i],0,127,0.0f,1.0f));
-		tg_mixer->gain(i,1.0f);
-		reverb_send_mixer->pan(i,mapfloat(m_nPan[i],0,127,0.0f,1.0f));
-		reverb_send_mixer->gain(i,mapfloat(m_nReverbSend[i],0,99,0.0f,1.0f));
-#endif
-	}
-
-	if (m_PerformanceConfig.Load ())
-	{
-		LoadPerformanceParameters(); 
+		int nPerfCh = GetParameter(ParameterPerformanceSelectChannel);
+		if(nPerfCh == CMIDIDevice::Disabled)
+		{
+			LOGNOTE("Program Change: Enabled for Voices");
+		}
+		else if(nPerfCh == CMIDIDevice::OmniMode)
+		{
+			LOGNOTE("Program Change: Enabled for Performances (Omni)");
+		}
+		else
+		{
+			LOGNOTE("Program Change: Enabled for Performances (CH %d)", nPerfCh + 1);
+		}
 	}
 	else
 	{
-		SetMIDIChannel (CMIDIDevice::OmniMode, 0);
+		LOGNOTE("Program Change: Disabled");
 	}
 
-	// load performances file list, and attempt to create the performance folder
-	if (!m_PerformanceConfig.ListPerformances()) 
+	for(unsigned i = 0; i < m_nToneGenerators; i++)
 	{
-		LOGERR ("Cannot create internal Performance folder, new performances can't be created");
+		assert(m_pTG[i]);
+
+		SetVolume(100, i);
+		ProgramChange(0, i);
+
+		m_pTG[i]->setTranspose(24);
+
+		m_pTG[i]->setPBController(2, 0);
+		m_pTG[i]->setMWController(99, 1, 0);
+
+		m_pTG[i]->setFCController(99, 1, 0);
+		m_pTG[i]->setBCController(99, 1, 0);
+		m_pTG[i]->setATController(99, 1, 0);
+
+#if defined(MIXING_CONSOLE_ENABLE)
+		this->m_pMixingConsole->reset();
+		this->m_pMixingConsole->setPan(i, this->m_nPan[i] / 127.0f);
+
+		this->m_pMixingConsole->setSendLevel(i, MixerOutput::FX_PlateReverb, this->m_nTGSendLevel[i][MixerOutput::FX_PlateReverb] / 99.0f);
+		this->m_pMixingConsole->setSendLevel(i, MixerOutput::MainOutput, this->m_nTGSendLevel[i][MixerOutput::MainOutput] / 99.0f);
+		this->m_pMixingConsole->setFXSendLevel(MixerOutput::FX_PlateReverb, MixerOutput::MainOutput, this->m_nFXSendLevel[MixerOutput::FX_PlateReverb][MixerOutput::FX_PlateReverb] / 99.0f);
+
+#elif defined(PLATE_REVERB_ENABLE)
+		tg_mixer->pan(i, mapfloat(m_nPan[i], 0, 127, 0.0f, 1.0f));
+		tg_mixer->gain(i, 1.0f);
+		reverb_send_mixer->pan(i, mapfloat(m_nPan[i], 0, 127, 0.0f, 1.0f));
+		reverb_send_mixer->gain(i, mapfloat(m_nReverbSend[i], 0, 99, 0.0f, 1.0f));
+
+#endif
 	}
-	
-	// setup and start the sound device
-	if (!m_pSoundDevice->AllocateQueueFrames (m_pConfig->GetChunkSize ()))
+
+	m_PerformanceConfig.Init(m_nToneGenerators);
+	if(m_PerformanceConfig.Load())
 	{
-		LOGERR ("Cannot allocate sound queue");
+		LoadPerformanceParameters();
+	}
+	else
+	{
+		SetMIDIChannel(CMIDIDevice::OmniMode, 0);
+	}
+
+	// setup and start the sound device
+	int Channels = 1;	// 16-bit Mono
+#ifdef ARM_ALLOW_MULTI_CORE
+	if(m_bQuadDAC8Chan)
+	{
+		Channels = 8;	// 16-bit 8-channel mono
+	}
+	else
+	{
+		Channels = 2;	// 16-bit Stereo
+	}
+#endif
+	// Need 2 x ChunkSize / Channel queue frames as the audio driver uses
+	// two DMA channels each of ChunkSize and one single single frame
+	// contains a sample for each of all the channels.
+	//
+	// See discussion here: https://github.com/rsta2/circle/discussions/453
+	if(!m_pSoundDevice->AllocateQueueFrames(2 * m_pConfig->GetChunkSize() / Channels))
+	{
+		LOGERR("Cannot allocate sound queue");
 
 		return false;
 	}
 
-#if defined(ARM_ALLOW_MULTI_CORE)
-																		
-	 
-	m_pSoundDevice->SetWriteFormat (SoundFormatSigned16, 2);	// 16-bit Stereo
-#else
-	m_pSoundDevice->SetWriteFormat (SoundFormatSigned16, 1);	// 16-bit Mono
-#endif
+	m_pSoundDevice->SetWriteFormat(SoundFormatSigned16, Channels);
 
-	m_nQueueSizeFrames = m_pSoundDevice->GetQueueSizeFrames ();
+	m_nQueueSizeFrames = m_pSoundDevice->GetQueueSizeFrames();
 
-	m_pSoundDevice->Start ();
+	m_pSoundDevice->Start();
 
 #if defined(ARM_ALLOW_MULTI_CORE)
 	// start secondary cores
-	if (!CMultiCoreSupport::Initialize ())
+	if(!CMultiCoreSupport::Initialize())
 	{
 		return false;
 	}
@@ -351,119 +452,139 @@ bool CMiniDexed::Initialize (void)
 	return true;
 }
 
-void CMiniDexed::Process (bool bPlugAndPlayUpdated)
+void CMiniDexed::Process(bool bPlugAndPlayUpdated)
 {
 #ifndef ARM_ALLOW_MULTI_CORE
-	ProcessSound ();
+	ProcessSound();
 #endif
 
-	for (unsigned i = 0; i < CConfig::MaxUSBMIDIDevices; i++)
+	for(unsigned i = 0; i < CConfig::MaxUSBMIDIDevices; i++)
 	{
-		assert (m_pMIDIKeyboard[i]);
-		m_pMIDIKeyboard[i]->Process (bPlugAndPlayUpdated);
+		assert(m_pMIDIKeyboard[i]);
+		m_pMIDIKeyboard[i]->Process(bPlugAndPlayUpdated);
 	}
 
-	m_PCKeyboard.Process (bPlugAndPlayUpdated);
+	m_PCKeyboard.Process(bPlugAndPlayUpdated);
 
-	if (m_bUseSerial)
+	if(m_bUseSerial)
 	{
-		m_SerialMIDI.Process ();
+		m_SerialMIDI.Process();
 	}
 
-	m_UI.Process ();
+	m_UI.Process();
 
-	if (m_bSavePerformance)
+	if(m_bSavePerformance)
 	{
-		DoSavePerformance ();
+		DoSavePerformance();
 
 		m_bSavePerformance = false;
 	}
 
-	if (m_bSavePerformanceNewFile)
+	if(m_bSavePerformanceNewFile)
 	{
-		DoSavePerformanceNewFile ();
+		DoSavePerformanceNewFile();
 		m_bSavePerformanceNewFile = false;
 	}
-	
-	if (m_bSetNewPerformance && !m_bLoadPerformanceBusy)
+
+	if(m_bSetNewPerformanceBank && !m_bLoadPerformanceBusy && !m_bLoadPerformanceBankBusy)
 	{
-		DoSetNewPerformance ();
-		if (m_nSetNewPerformanceID == GetActualPerformanceID())
+		DoSetNewPerformanceBank();
+		if(m_nSetNewPerformanceBankID == GetActualPerformanceBankID())
+		{
+			m_bSetNewPerformanceBank = false;
+		}
+
+		// If there is no pending SetNewPerformance already, then see if we need to find the first performance to load
+		// NB: If called from the UI, then there will not be a SetNewPerformance, so load the first existing one.
+		//     If called from MIDI, there will probably be a SetNewPerformance alongside the Bank select.
+		if(!m_bSetNewPerformance && m_bSetFirstPerformance)
+		{
+			DoSetFirstPerformance();
+		}
+	}
+
+	if(m_bSetNewPerformance && !m_bSetNewPerformanceBank && !m_bLoadPerformanceBusy && !m_bLoadPerformanceBankBusy)
+	{
+		DoSetNewPerformance();
+		if(m_nSetNewPerformanceID == GetActualPerformanceID())
 		{
 			m_bSetNewPerformance = false;
 		}
-		
 	}
-	
+
 	if(m_bDeletePerformance)
 	{
-		DoDeletePerformance ();
+		DoDeletePerformance();
 		m_bDeletePerformance = false;
 	}
-		
-	if (m_bProfileEnabled)
+
+	if(m_bProfileEnabled)
 	{
-		m_GetChunkTimer.Dump ();
+		m_GetChunkTimer.Dump();
 	}
 }
 
 #ifdef ARM_ALLOW_MULTI_CORE
 
-void CMiniDexed::Run (unsigned nCore)
+void CMiniDexed::Run(unsigned nCore)
 {
-	assert (1 <= nCore && nCore < CORES);
+	assert(1 <= nCore && nCore < CORES);
 
-	if (nCore == 1)
+	if(nCore == 1)
 	{
 		m_CoreStatus[nCore] = CoreStatusIdle;			// core 1 ready
 
 		// wait for cores 2 and 3 to be ready
-		for (unsigned nCore = 2; nCore < CORES; nCore++)
+		for(unsigned nCore = 2; nCore < CORES; nCore++)
 		{
-			while (m_CoreStatus[nCore] != CoreStatusIdle)
+			while(m_CoreStatus[nCore] != CoreStatusIdle)
 			{
 				// just wait
 			}
 		}
 
-		while (m_CoreStatus[nCore] != CoreStatusExit)
+		while(m_CoreStatus[nCore] != CoreStatusExit)
 		{
-			ProcessSound ();
+			ProcessSound();
 		}
 	}
 	else								// core 2 and 3
 	{
-		while (1)
+		while(1)
 		{
 			m_CoreStatus[nCore] = CoreStatusIdle;		// ready to be kicked
-			while (m_CoreStatus[nCore] == CoreStatusIdle)
+			while(m_CoreStatus[nCore] == CoreStatusIdle)
 			{
 				// just wait
 			}
 
 			// now kicked from core 1
 
-			if (m_CoreStatus[nCore] == CoreStatusExit)
+			if(m_CoreStatus[nCore] == CoreStatusExit)
 			{
 				m_CoreStatus[nCore] = CoreStatusUnknown;
 
 				break;
 			}
 
-			assert (m_CoreStatus[nCore] == CoreStatusBusy);
+			assert(m_CoreStatus[nCore] == CoreStatusBusy);
 
 			// process the TGs, assigned to this core (2 or 3)
 
-			assert (m_nFramesToProcess <= CConfig::MaxChunkSize);
-			unsigned nTG = CConfig::TGsCore1 + (nCore-2)*CConfig::TGsCore23;
-			for (unsigned i = 0; i < CConfig::TGsCore23; i++, nTG++)
+			assert(m_nFramesToProcess <= CConfig::MaxChunkSize);
+			unsigned nTG = m_pConfig->GetTGsCore1() + (nCore - 2) * m_pConfig->GetTGsCore23();
+			for(unsigned i = 0; i < m_pConfig->GetTGsCore23(); i++, nTG++)
 			{
-				assert (m_pTG[nTG]);
-				m_pTG[nTG]->getSamples (m_OutputLevel[nTG],m_nFramesToProcess);
+				assert(nTG < CConfig::AllToneGenerators);
+				if(nTG < m_pConfig->GetToneGenerators())
+				{
+					assert(m_pTG[nTG]);
+					m_pTG[nTG]->getSamples(m_OutputLevel[nTG], m_nFramesToProcess);
 
 #if defined(MIXING_CONSOLE_ENABLE)
-				this->mixing_console_->preProcessInputSampleBuffer(nTG, this->m_nFramesToProcess);
+					this->m_pMixingConsole->preProcessInputSampleBuffer(nTG, this->m_nFramesToProcess);
 #endif
+				}
 			}
 		}
 	}
@@ -471,31 +592,53 @@ void CMiniDexed::Run (unsigned nCore)
 
 #endif
 
-CSysExFileLoader *CMiniDexed::GetSysExFileLoader (void)
+CSysExFileLoader* CMiniDexed::GetSysExFileLoader(void)
 {
 	return &m_SysExFileLoader;
 }
 
-void CMiniDexed::BankSelect (unsigned nBank, unsigned nTG)
+CPerformanceConfig* CMiniDexed::GetPerformanceConfig(void)
 {
-	nBank=constrain((int)nBank,0,16383);
+	return &m_PerformanceConfig;
+}
 
-	assert (nTG < CConfig::ToneGenerators);
-	
-	if (GetSysExFileLoader ()->IsValidBank(nBank))
+void CMiniDexed::BankSelect(unsigned nBank, unsigned nTG)
+{
+	nBank = constrain((int)nBank, 0, 16383);
+
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
+
+	if(GetSysExFileLoader()->IsValidBank(nBank))
 	{
 		// Only change if we have the bank loaded
 		m_nVoiceBankID[nTG] = nBank;
 
-		m_UI.ParameterChanged ();
+		m_UI.ParameterChanged();
 	}
 }
 
-void CMiniDexed::BankSelectMSB (unsigned nBankMSB, unsigned nTG)
+void CMiniDexed::BankSelectPerformance(unsigned nBank)
 {
-	nBankMSB=constrain((int)nBankMSB,0,127);
+	nBank = constrain((int)nBank, 0, 16383);
 
-	assert (nTG < CConfig::ToneGenerators);
+	if(GetPerformanceConfig()->IsValidPerformanceBank(nBank))
+	{
+		// Only change if we have the bank loaded
+		m_nVoiceBankIDPerformance = nBank;
+		SetNewPerformanceBank(nBank);
+
+		m_UI.ParameterChanged();
+	}
+}
+
+void CMiniDexed::BankSelectMSB(unsigned nBankMSB, unsigned nTG)
+{
+	nBankMSB = constrain((int)nBankMSB, 0, 127);
+
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
+
 	// MIDI Spec 1.0 "BANK SELECT" states:
 	//   "The transmitter must transmit the MSB and LSB as a pair,
 	//   and the Program Change must be sent immediately after
@@ -506,11 +649,19 @@ void CMiniDexed::BankSelectMSB (unsigned nBankMSB, unsigned nTG)
 	m_nVoiceBankIDMSB[nTG] = nBankMSB;
 }
 
-void CMiniDexed::BankSelectLSB (unsigned nBankLSB, unsigned nTG)
+void CMiniDexed::BankSelectMSBPerformance(unsigned nBankMSB)
 {
-	nBankLSB=constrain((int)nBankLSB,0,127);
+	nBankMSB = constrain((int)nBankMSB, 0, 127);
+	m_nVoiceBankIDMSBPerformance = nBankMSB;
+}
 
-	assert (nTG < CConfig::ToneGenerators);
+void CMiniDexed::BankSelectLSB(unsigned nBankLSB, unsigned nTG)
+{
+	nBankLSB = constrain((int)nBankLSB, 0, 127);
+
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
+
 	unsigned nBank = m_nVoiceBankID[nTG];
 	unsigned nBankMSB = m_nVoiceBankIDMSB[nTG];
 	nBank = (nBankMSB << 7) + nBankLSB;
@@ -519,13 +670,25 @@ void CMiniDexed::BankSelectLSB (unsigned nBankLSB, unsigned nTG)
 	BankSelect(nBank, nTG);
 }
 
-void CMiniDexed::ProgramChange (unsigned nProgram, unsigned nTG)
+void CMiniDexed::BankSelectLSBPerformance(unsigned nBankLSB)
 {
-	assert (m_pConfig);
+	nBankLSB = constrain((int)nBankLSB, 0, 127);
+
+	unsigned nBank = m_nVoiceBankIDPerformance;
+	unsigned nBankMSB = m_nVoiceBankIDMSBPerformance;
+	nBank = (nBankMSB << 7) + nBankLSB;
+
+	// Now should have both MSB and LSB so enable the BankSelect
+	BankSelectPerformance(nBank);
+}
+
+void CMiniDexed::ProgramChange(unsigned nProgram, unsigned nTG)
+{
+	assert(m_pConfig);
 
 	unsigned nBankOffset;
 	bool bPCAcrossBanks = m_pConfig->GetExpandPCAcrossBanks();
-	if (bPCAcrossBanks)
+	if(bPCAcrossBanks)
 	{
 		// Note: This doesn't actually change the bank in use
 		//       but will allow PC messages of 0..127
@@ -536,89 +699,108 @@ void CMiniDexed::ProgramChange (unsigned nProgram, unsigned nTG)
 		//       PC 32-63  = Bank 6, Program 0-31
 		//       PC 64-95  = Bank 7, Program 0-31
 		//       PC 96-127 = Bank 8, Program 0-31
-		nProgram=constrain((int)nProgram,0,127);
+		nProgram = constrain((int)nProgram, 0, 127);
 		nBankOffset = nProgram >> 5;
 		nProgram = nProgram % 32;
 	}
 	else
 	{
 		nBankOffset = 0;
-		nProgram=constrain((int)nProgram,0,31);
+		nProgram = constrain((int)nProgram, 0, 31);
 	}
 
-	assert (nTG < CConfig::ToneGenerators);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
+
 	m_nProgram[nTG] = nProgram;
 
 	uint8_t Buffer[156];
-	m_SysExFileLoader.GetVoice (m_nVoiceBankID[nTG]+nBankOffset, nProgram, Buffer);
+	m_SysExFileLoader.GetVoice(m_nVoiceBankID[nTG] + nBankOffset, nProgram, Buffer);
 
-	assert (m_pTG[nTG]);
-	m_pTG[nTG]->loadVoiceParameters (Buffer);
+	assert(m_pTG[nTG]);
+	m_pTG[nTG]->loadVoiceParameters(Buffer);
 
-	if (m_pConfig->GetMIDIAutoVoiceDumpOnPC())
+	if(m_pConfig->GetMIDIAutoVoiceDumpOnPC())
 	{
 		// Only do the voice dump back out over MIDI if we have a specific
 		// MIDI channel configured for this TG
-		if (m_nMIDIChannel[nTG] < CMIDIDevice::Channels)
+		if(m_nMIDIChannel[nTG] < CMIDIDevice::Channels)
 		{
-			m_SerialMIDI.SendSystemExclusiveVoice(nProgram,0,nTG);
+			m_SerialMIDI.SendSystemExclusiveVoice(nProgram, 0, nTG);
 		}
 	}
 
-	m_UI.ParameterChanged ();
+	m_UI.ParameterChanged();
 }
 
-void CMiniDexed::SetVolume (unsigned nVolume, unsigned nTG)
+void CMiniDexed::ProgramChangePerformance(unsigned nProgram)
 {
-	nVolume=constrain((int)nVolume,0,127);
+	if(m_nParameter[ParameterPerformanceSelectChannel] != CMIDIDevice::Disabled)
+	{
+		// Program Change messages change Performances.
+		if(m_PerformanceConfig.IsValidPerformance(nProgram))
+		{
+			SetNewPerformance(nProgram);
+		}
+		m_UI.ParameterChanged();
+	}
+}
 
-	assert (nTG < CConfig::ToneGenerators);
+void CMiniDexed::SetVolume(unsigned nVolume, unsigned nTG)
+{
+	nVolume = constrain((int)nVolume, 0, 127);
+
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
+
 	m_nVolume[nTG] = nVolume;
 
-	assert (m_pTG[nTG]);
-	m_pTG[nTG]->setGain (nVolume / 127.0f);
+	assert(m_pTG[nTG]);
+	m_pTG[nTG]->setGain(nVolume / 127.0f);
 
 #if defined(MIXING_CONSOLE_ENABLE)
-	this->mixing_console_->setChannelLevel(nTG, nVolume == 0 ? 0.0f : 1.0f);
+	this->m_pMixingConsole->setChannelLevel(nTG, nVolume == 0 ? 0.0f : 1.0f);
 #endif
 
-	m_UI.ParameterChanged ();
+	m_UI.ParameterChanged();
 }
 
-void CMiniDexed::SetPan (unsigned nPan, unsigned nTG)
+void CMiniDexed::SetPan(unsigned nPan, unsigned nTG)
 {
-	nPan=constrain((int)nPan,0,127);
+	nPan = constrain((int)nPan, 0, 127);
 
-	assert (nTG < CConfig::ToneGenerators);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
+
 	m_nPan[nTG] = nPan;
 
 #if defined(MIXING_CONSOLE_ENABLE)
-	this->mixing_console_->setPan(nTG, nPan / 127.0f);
+	this->m_pMixingConsole->setPan(nTG, nPan / 127.0f);
 
 #elif defined(PLATE_REVERB_ENABLE)
+	tg_mixer->pan(nTG, mapfloat(nPan, 0, 127, 0.0f, 1.0f));
+	reverb_send_mixer->pan(nTG, mapfloat(nPan, 0, 127, 0.0f, 1.0f));
 
-	tg_mixer->pan(nTG,mapfloat(nPan,0,127,0.0f,1.0f));
-	reverb_send_mixer->pan(nTG,mapfloat(nPan,0,127,0.0f,1.0f));
 #endif
 
-	m_UI.ParameterChanged ();
+	m_UI.ParameterChanged();
 }
 
 #if defined(MIXING_CONSOLE_ENABLE)
 
 unsigned CMiniDexed::getMixingConsoleSendLevel(unsigned nTG, MixerOutput fx) const
 {
-	assert (nTG < CConfig::ToneGenerators);
+	assert(nTG < CConfig::AllToneGenerators);
 	return this->m_nTGSendLevel[nTG][fx];
 }
 
 void CMiniDexed::setMixingConsoleSendLevel(unsigned nTG, MixerOutput fx, unsigned nFXSend)
 {
-	assert (nTG < CConfig::ToneGenerators);
+	assert(nTG < CConfig::AllToneGenerators);
 	nFXSend = constrain((int)nFXSend, 0, 99);
 
 	this->m_nTGSendLevel[nTG][fx] = nFXSend;
-	this->mixing_console_->setSendLevel(nTG, fx, nFXSend / 99.0f);
+	this->m_pMixingConsole->setSendLevel(nTG, fx, nFXSend / 99.0f);
 
 	this->m_UI.ParameterChanged();
 }
@@ -631,143 +813,159 @@ void CMiniDexed::setMixingConsoleFXSendLevel(MixerOutput fromFX, MixerOutput toF
 	{
 		nFXSend = constrain((int)nFXSend, 0, 99);
 		this->m_nFXSendLevel[fromFX][toFX] = nFXSend;
-		this->mixing_console_->setFXSendLevel(fromFX, toFX, nFXSend / 99.0f);
+		this->m_pMixingConsole->setFXSendLevel(fromFX, toFX, nFXSend / 99.0f);
 	}
 }
 
 #elif defined(PLATE_REVERB_ENABLE)
 
-void CMiniDexed::SetReverbSend (unsigned nReverbSend, unsigned nTG)
+void CMiniDexed::SetReverbSend(unsigned nReverbSend, unsigned nTG)
 {
-	nReverbSend=constrain((int)nReverbSend,0,99);
+	nReverbSend = constrain((int)nReverbSend, 0, 99);
 
-	assert (nTG < CConfig::ToneGenerators);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
+
 	m_nReverbSend[nTG] = nReverbSend;
 
-	reverb_send_mixer->gain(nTG,mapfloat(nReverbSend,0,99,0.0f,1.0f));
-	
-	m_UI.ParameterChanged ();
+	reverb_send_mixer->gain(nTG, mapfloat(nReverbSend, 0, 99, 0.0f, 1.0f));
+
+	m_UI.ParameterChanged();
 }
 
 #endif
 
-void CMiniDexed::SetMasterTune (int nMasterTune, unsigned nTG)
+void CMiniDexed::SetMasterTune(int nMasterTune, unsigned nTG)
 {
-	nMasterTune=constrain((int)nMasterTune,-99,99);
+	nMasterTune = constrain((int)nMasterTune, -99, 99);
 
-	assert (nTG < CConfig::ToneGenerators);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
+
 	m_nMasterTune[nTG] = nMasterTune;
 
-	assert (m_pTG[nTG]);
-	m_pTG[nTG]->setMasterTune ((int8_t) nMasterTune);
+	assert(m_pTG[nTG]);
+	m_pTG[nTG]->setMasterTune((int8_t)nMasterTune);
 
-	m_UI.ParameterChanged ();
+	m_UI.ParameterChanged();
 }
 
-void CMiniDexed::SetCutoff (int nCutoff, unsigned nTG)
+void CMiniDexed::SetCutoff(int nCutoff, unsigned nTG)
 {
-	nCutoff = constrain (nCutoff, 0, 99);
+	nCutoff = constrain(nCutoff, 0, 99);
 
-	assert (nTG < CConfig::ToneGenerators);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
+
 	m_nCutoff[nTG] = nCutoff;
 
-	assert (m_pTG[nTG]);
-	m_pTG[nTG]->setFilterCutoff (mapfloat (nCutoff, 0, 99, 0.0f, 1.0f));
+	assert(m_pTG[nTG]);
+	m_pTG[nTG]->setFilterCutoff(mapfloat(nCutoff, 0, 99, 0.0f, 1.0f));
 
-	m_UI.ParameterChanged ();
+	m_UI.ParameterChanged();
 }
 
-void CMiniDexed::SetResonance (int nResonance, unsigned nTG)
+void CMiniDexed::SetResonance(int nResonance, unsigned nTG)
 {
-	nResonance = constrain (nResonance, 0, 99);
+	nResonance = constrain(nResonance, 0, 99);
 
-	assert (nTG < CConfig::ToneGenerators);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
+
 	m_nResonance[nTG] = nResonance;
 
-	assert (m_pTG[nTG]);
-	m_pTG[nTG]->setFilterResonance (mapfloat (nResonance, 0, 99, 0.0f, 1.0f));
+	assert(m_pTG[nTG]);
+	m_pTG[nTG]->setFilterResonance(mapfloat(nResonance, 0, 99, 0.0f, 1.0f));
 
-	m_UI.ParameterChanged ();
+	m_UI.ParameterChanged();
 }
 
 
 
-void CMiniDexed::SetMIDIChannel (uint8_t uchChannel, unsigned nTG)
+void CMiniDexed::SetMIDIChannel(uint8_t uchChannel, unsigned nTG)
 {
-	assert (nTG < CConfig::ToneGenerators);
-	assert (uchChannel < CMIDIDevice::ChannelUnknown);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
+
+	assert(uchChannel < CMIDIDevice::ChannelUnknown);
 
 	m_nMIDIChannel[nTG] = uchChannel;
 
-	for (unsigned i = 0; i < CConfig::MaxUSBMIDIDevices; i++)
+	for(unsigned i = 0; i < CConfig::MaxUSBMIDIDevices; i++)
 	{
-		assert (m_pMIDIKeyboard[i]);
-		m_pMIDIKeyboard[i]->SetChannel (uchChannel, nTG);
+		assert(m_pMIDIKeyboard[i]);
+		m_pMIDIKeyboard[i]->SetChannel(uchChannel, nTG);
 	}
 
-	m_PCKeyboard.SetChannel (uchChannel, nTG);
+	m_PCKeyboard.SetChannel(uchChannel, nTG);
 
-	if (m_bUseSerial)
+	if(m_bUseSerial)
 	{
-		m_SerialMIDI.SetChannel (uchChannel, nTG);
+		m_SerialMIDI.SetChannel(uchChannel, nTG);
 	}
 
 #ifdef ARM_ALLOW_MULTI_CORE
-	unsigned nActiveTGs = 0;
-	for (unsigned nTG = 0; nTG < CConfig::ToneGenerators; nTG++)
-	{
-		if (m_nMIDIChannel[nTG] != CMIDIDevice::Disabled)
+	/* This doesn't appear to be used anywhere...
+		unsigned nActiveTGs = 0;
+		for(unsigned nTG = 0; nTG < CConfig::AllToneGenerators; nTG++)
 		{
-			nActiveTGs++;
+			if(m_nMIDIChannel[nTG] != CMIDIDevice::Disabled)
+			{
+				nActiveTGs++;
+			}
 		}
-	}
 
-	assert (nActiveTGs <= 8);
-	static const unsigned Log2[] = {0, 0, 1, 2, 2, 3, 3, 3, 3};
-	m_nActiveTGsLog2 = Log2[nActiveTGs];
+		assert(nActiveTGs <= 8);
+		static const unsigned Log2[] = {0, 0, 1, 2, 2, 3, 3, 3, 3};
+		m_nActiveTGsLog2 = Log2[nActiveTGs];
+	*/
 #endif
 
-	m_UI.ParameterChanged ();
+	m_UI.ParameterChanged();
 }
 
-void CMiniDexed::keyup (int16_t pitch, unsigned nTG)
+void CMiniDexed::keyup(int16_t pitch, unsigned nTG)
 {
-	assert (nTG < CConfig::ToneGenerators);
-	assert (m_pTG[nTG]);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
 
-	pitch = ApplyNoteLimits (pitch, nTG);
-	if (pitch >= 0)
+	assert(m_pTG[nTG]);
+
+	pitch = ApplyNoteLimits(pitch, nTG);
+	if(pitch >= 0)
 	{
-		m_pTG[nTG]->keyup (pitch);
+		m_pTG[nTG]->keyup(pitch);
 	}
 }
 
-void CMiniDexed::keydown (int16_t pitch, uint8_t velocity, unsigned nTG)
+void CMiniDexed::keydown(int16_t pitch, uint8_t velocity, unsigned nTG)
 {
-	assert (nTG < CConfig::ToneGenerators);
-	assert (m_pTG[nTG]);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
 
-	pitch = ApplyNoteLimits (pitch, nTG);
-	if (pitch >= 0)
+	assert(m_pTG[nTG]);
+
+	pitch = ApplyNoteLimits(pitch, nTG);
+	if(pitch >= 0)
 	{
-		m_pTG[nTG]->keydown (pitch, velocity);
+		m_pTG[nTG]->keydown(pitch, velocity);
 	}
 }
 
-int16_t CMiniDexed::ApplyNoteLimits (int16_t pitch, unsigned nTG)
+int16_t CMiniDexed::ApplyNoteLimits(int16_t pitch, unsigned nTG)
 {
-	assert (nTG < CConfig::ToneGenerators);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return -1;  // Not an active TG
 
-	if (   pitch < (int16_t) m_nNoteLimitLow[nTG]
-	    || pitch > (int16_t) m_nNoteLimitHigh[nTG])
+	if(pitch < (int16_t)m_nNoteLimitLow[nTG]
+		|| pitch >(int16_t)m_nNoteLimitHigh[nTG])
 	{
 		return -1;
 	}
 
 	pitch += m_nNoteShift[nTG];
 
-	if (   pitch < 0
-	    || pitch > 127)
+	if(pitch < 0 || pitch > 127)
 	{
 		return -1;
 	}
@@ -777,693 +975,713 @@ int16_t CMiniDexed::ApplyNoteLimits (int16_t pitch, unsigned nTG)
 
 void CMiniDexed::setSustain(bool sustain, unsigned nTG)
 {
-	assert (nTG < CConfig::ToneGenerators);
-	assert (m_pTG[nTG]);
-	m_pTG[nTG]->setSustain (sustain);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
+
+	assert(m_pTG[nTG]);
+	m_pTG[nTG]->setSustain(sustain);
 }
 
 void CMiniDexed::panic(uint8_t value, unsigned nTG)
 {
-	assert (nTG < CConfig::ToneGenerators);
-	assert (m_pTG[nTG]);
-	if (value == 0) {
-		m_pTG[nTG]->panic ();
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
+
+	assert(m_pTG[nTG]);
+	if(value == 0)
+	{
+		m_pTG[nTG]->panic();
 	}
 }
 
 void CMiniDexed::notesOff(uint8_t value, unsigned nTG)
 {
-	assert (nTG < CConfig::ToneGenerators);
-	assert (m_pTG[nTG]);
-	if (value == 0) {
-		m_pTG[nTG]->notesOff ();
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
+
+	assert(m_pTG[nTG]);
+	if(value == 0)
+	{
+		m_pTG[nTG]->notesOff();
 	}
 }
 
-void CMiniDexed::setModWheel (uint8_t value, unsigned nTG)
+void CMiniDexed::setModWheel(uint8_t value, unsigned nTG)
 {
-	assert (nTG < CConfig::ToneGenerators);
-	assert (m_pTG[nTG]);
-	m_pTG[nTG]->setModWheel (value);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
+
+	assert(m_pTG[nTG]);
+	m_pTG[nTG]->setModWheel(value);
 }
 
 
-void CMiniDexed::setFootController (uint8_t value, unsigned nTG)
+void CMiniDexed::setFootController(uint8_t value, unsigned nTG)
 {
-	assert (nTG < CConfig::ToneGenerators);
-	assert (m_pTG[nTG]);
-	m_pTG[nTG]->setFootController (value);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
+
+	assert(m_pTG[nTG]);
+	m_pTG[nTG]->setFootController(value);
 }
 
-void CMiniDexed::setBreathController (uint8_t value, unsigned nTG)
+void CMiniDexed::setBreathController(uint8_t value, unsigned nTG)
 {
-	assert (nTG < CConfig::ToneGenerators);
-	assert (m_pTG[nTG]);
-	m_pTG[nTG]->setBreathController (value);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
+
+	assert(m_pTG[nTG]);
+	m_pTG[nTG]->setBreathController(value);
 }
 
-void CMiniDexed::setAftertouch (uint8_t value, unsigned nTG)
+void CMiniDexed::setAftertouch(uint8_t value, unsigned nTG)
 {
-	assert (nTG < CConfig::ToneGenerators);
-	assert (m_pTG[nTG]);
-	m_pTG[nTG]->setAftertouch (value);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
+
+	assert(m_pTG[nTG]);
+	m_pTG[nTG]->setAftertouch(value);
 }
 
-void CMiniDexed::setPitchbend (int16_t value, unsigned nTG)
+void CMiniDexed::setPitchbend(int16_t value, unsigned nTG)
 {
-	assert (nTG < CConfig::ToneGenerators);
-	assert (m_pTG[nTG]);
-	m_pTG[nTG]->setPitchbend (value);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
+
+	assert(m_pTG[nTG]);
+	m_pTG[nTG]->setPitchbend(value);
 }
 
-void CMiniDexed::ControllersRefresh (unsigned nTG)
+void CMiniDexed::ControllersRefresh(unsigned nTG)
 {
-	assert (nTG < CConfig::ToneGenerators);
-	assert (m_pTG[nTG]);
-	m_pTG[nTG]->ControllersRefresh ();
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
+
+	assert(m_pTG[nTG]);
+	m_pTG[nTG]->ControllersRefresh();
 }
 
-void CMiniDexed::SetParameter (TParameter Parameter, int nValue)
+void CMiniDexed::SetParameter(TParameter Parameter, int nValue)
 {
-				 
+
 
 	assert(Parameter < TParameter::ParameterUnknown);
-	
+
 	m_nParameter[Parameter] = nValue;
 
-	switch (Parameter)
+	switch(Parameter)
 	{
-	case TParameter::ParameterCompressorEnable:
-		for (unsigned nTG = 0; nTG < CConfig::ToneGenerators; ++nTG)
+	case ParameterCompressorEnable:
+		for(unsigned nTG = 0; nTG < m_nToneGenerators; nTG++)
 		{
 			assert(m_pTG[nTG]);
-			m_pTG[nTG]->setCompressor (!!nValue);
+			m_pTG[nTG]->setCompressor(!!nValue);
 		}
 		break;
 
 #if defined(MIXING_CONSOLE_ENABLE)
 
-	// Tube parameters
-	case TParameter::ParameterFXTubeEnable: 
+		// Tube parameters
+	case TParameter::ParameterFXTubeEnable:
 		this->m_FXSpinLock.Acquire();
-		this->mixing_console_->getTube()->setMute(!!!nValue);
+		this->m_pMixingConsole->getTube()->setMute(!!!nValue);
 		this->m_FXSpinLock.Release();
 		break;
-	case TParameter::ParameterFXTubeOverdrive: 
-		nValue = constrain((int)nValue, 0, 99);
+	case TParameter::ParameterFXTubeOverdrive:
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
-		this->mixing_console_->getTube()->setOverdrive(nValue / 99.0f);
-		this->m_FXSpinLock.Release();
-		break;
-	
-	// Chorus parameters
-	case TParameter::ParameterFXChorusEnable: 
-		this->m_FXSpinLock.Acquire();
-		this->mixing_console_->getChorus()->setMute(!!!nValue);
-		this->m_FXSpinLock.Release();
-		break;
-	case TParameter::ParameterFXChorusRate: 
-		nValue = constrain((int)nValue, 0, 99);
-		this->m_FXSpinLock.Acquire();
-		this->mixing_console_->getChorus()->setRate(nValue / 99.0f);
-		this->m_FXSpinLock.Release();
-		break;
-	case TParameter::ParameterFXChorusDepth: 
-		nValue = constrain((int)nValue, 0, 99);
-		this->m_FXSpinLock.Acquire();
-		this->mixing_console_->getChorus()->setDepth(nValue / 9.9f);
-		this->m_FXSpinLock.Release();
-		break;
-	
-	// Flanger parameters
-	case TParameter::ParameterFXFlangerEnable: 
-		this->m_FXSpinLock.Acquire();
-		this->mixing_console_->getFlanger()->setMute(!!!nValue);
-		this->m_FXSpinLock.Release();
-		break;
-	case TParameter::ParameterFXFlangerRate: 
-		nValue = constrain((int)nValue, 0, 99);
-		this->m_FXSpinLock.Acquire();
-		this->mixing_console_->getFlanger()->setRate(nValue / 99.0f);
-		this->m_FXSpinLock.Release();
-		break;
-	case TParameter::ParameterFXFlangerDepth: 
-		nValue = constrain((int)nValue, 0, 99);
-		this->m_FXSpinLock.Acquire();
-		this->mixing_console_->getFlanger()->setDepth(nValue / 99.0f);
-		this->m_FXSpinLock.Release();
-		break;
-	case TParameter::ParameterFXFlangerFeedback: 
-		nValue = constrain((int)nValue, 0, 99);
-		this->m_FXSpinLock.Acquire();
-		this->mixing_console_->getFlanger()->setFeedback(mapfloat(nValue, 0, 99, 0.0f, 0.97f));
-		this->m_FXSpinLock.Release();
-		break;
-	
-	// Orbitone parameters
-	case TParameter::ParameterFXOrbitoneEnable: 
-		this->m_FXSpinLock.Acquire();
-		this->mixing_console_->getOrbitone()->setMute(!!!nValue);
-		this->m_FXSpinLock.Release();
-		break;
-	case TParameter::ParameterFXOrbitoneRate: 
-		nValue = constrain((int)nValue, 0, 99);
-		this->m_FXSpinLock.Acquire();
-		this->mixing_console_->getOrbitone()->setRate(nValue / 99.0f);
-		this->m_FXSpinLock.Release();
-		break;
-	case TParameter::ParameterFXOrbitoneDepth: 
-		nValue = constrain((int)nValue, 0, 99);
-		this->m_FXSpinLock.Acquire();
-		this->mixing_console_->getOrbitone()->setDepth(nValue / 99.0f);
-		this->m_FXSpinLock.Release();
-		break;
-	
-	// Phaser parameters
-	case TParameter::ParameterFXPhaserEnable: 
-		this->m_FXSpinLock.Acquire();
-		this->mixing_console_->getPhaser()->setMute(!!!nValue);
-		this->m_FXSpinLock.Release();
-		break;
-	case TParameter::ParameterFXPhaserRate: 
-		nValue = constrain((int)nValue, 0, 99);
-		this->m_FXSpinLock.Acquire();
-		this->mixing_console_->getPhaser()->setRate(nValue / 99.0f);
-		this->m_FXSpinLock.Release();
-		break;
-	case TParameter::ParameterFXPhaserDepth: 
-		nValue = constrain((int)nValue, 0, 99);
-		this->m_FXSpinLock.Acquire();
-		this->mixing_console_->getPhaser()->setDepth(nValue / 99.0f);
-		this->m_FXSpinLock.Release();
-		break;
-	case TParameter::ParameterFXPhaserFeedback: 
-		nValue = constrain((int)nValue, 0, 99);
-		this->m_FXSpinLock.Acquire();
-		this->mixing_console_->getPhaser()->setFeedback(mapfloat(nValue, 0, 99, 0.0f, 0.97f));
-		this->m_FXSpinLock.Release();
-		break;
-	case TParameter::ParameterFXPhaserNbStages: 
-		nValue = constrain((int)nValue, 2, MAX_NB_PHASES);
-		this->m_FXSpinLock.Acquire();
-		this->mixing_console_->getPhaser()->setNbStages(nValue);
+		this->m_pMixingConsole->getTube()->setOverdrive(nValue / 99.0f);
 		this->m_FXSpinLock.Release();
 		break;
 
-	// Delay parameters
-	case TParameter::ParameterFXDelayEnable: 
+		// Chorus parameters
+	case TParameter::ParameterFXChorusEnable:
 		this->m_FXSpinLock.Acquire();
-		this->mixing_console_->getDelay()->setMute(!!!nValue);
+		this->m_pMixingConsole->getChorus()->setMute(!!!nValue);
 		this->m_FXSpinLock.Release();
 		break;
-	case TParameter::ParameterFXDelayLeftDelayTime: 
-		nValue = constrain((int)nValue, -99, 99);
+	case TParameter::ParameterFXChorusRate:
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
-		this->mixing_console_->getDelay()->setLeftDelayTime(nValue / 99.0f);
+		this->m_pMixingConsole->getChorus()->setRate(nValue / 99.0f);
 		this->m_FXSpinLock.Release();
 		break;
-	case TParameter::ParameterFXDelayRightDelayTime: 
-		nValue = constrain((int)nValue, -99, 99);
+	case TParameter::ParameterFXChorusDepth:
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
-		this->mixing_console_->getDelay()->setRightDelayTime(nValue / 99.0f);
-		this->m_FXSpinLock.Release();
-		break;
-	case TParameter::ParameterFXDelayFeedback: 
-		nValue = constrain((int)nValue, 0, 99);
-		this->m_FXSpinLock.Acquire();
-		this->mixing_console_->getDelay()->setFeedback(nValue / 99.0f);
+		this->m_pMixingConsole->getChorus()->setDepth(nValue / 9.9f);
 		this->m_FXSpinLock.Release();
 		break;
 
-	// AudioEffectPlateReverb parameters
+		// Flanger parameters
+	case TParameter::ParameterFXFlangerEnable:
+		this->m_FXSpinLock.Acquire();
+		this->m_pMixingConsole->getFlanger()->setMute(!!!nValue);
+		this->m_FXSpinLock.Release();
+		break;
+	case TParameter::ParameterFXFlangerRate:
+		nValue = constrain(nValue, 0, 99);
+		this->m_FXSpinLock.Acquire();
+		this->m_pMixingConsole->getFlanger()->setRate(nValue / 99.0f);
+		this->m_FXSpinLock.Release();
+		break;
+	case TParameter::ParameterFXFlangerDepth:
+		nValue = constrain(nValue, 0, 99);
+		this->m_FXSpinLock.Acquire();
+		this->m_pMixingConsole->getFlanger()->setDepth(nValue / 99.0f);
+		this->m_FXSpinLock.Release();
+		break;
+	case TParameter::ParameterFXFlangerFeedback:
+		nValue = constrain(nValue, 0, 99);
+		this->m_FXSpinLock.Acquire();
+		this->m_pMixingConsole->getFlanger()->setFeedback(mapfloat(nValue, 0, 99, 0.0f, 0.97f));
+		this->m_FXSpinLock.Release();
+		break;
+
+		// Orbitone parameters
+	case TParameter::ParameterFXOrbitoneEnable:
+		this->m_FXSpinLock.Acquire();
+		this->m_pMixingConsole->getOrbitone()->setMute(!!!nValue);
+		this->m_FXSpinLock.Release();
+		break;
+	case TParameter::ParameterFXOrbitoneRate:
+		nValue = constrain(nValue, 0, 99);
+		this->m_FXSpinLock.Acquire();
+		this->m_pMixingConsole->getOrbitone()->setRate(nValue / 99.0f);
+		this->m_FXSpinLock.Release();
+		break;
+	case TParameter::ParameterFXOrbitoneDepth:
+		nValue = constrain(nValue, 0, 99);
+		this->m_FXSpinLock.Acquire();
+		this->m_pMixingConsole->getOrbitone()->setDepth(nValue / 99.0f);
+		this->m_FXSpinLock.Release();
+		break;
+
+		// Phaser parameters
+	case TParameter::ParameterFXPhaserEnable:
+		this->m_FXSpinLock.Acquire();
+		this->m_pMixingConsole->getPhaser()->setMute(!!!nValue);
+		this->m_FXSpinLock.Release();
+		break;
+	case TParameter::ParameterFXPhaserRate:
+		nValue = constrain(nValue, 0, 99);
+		this->m_FXSpinLock.Acquire();
+		this->m_pMixingConsole->getPhaser()->setRate(nValue / 99.0f);
+		this->m_FXSpinLock.Release();
+		break;
+	case TParameter::ParameterFXPhaserDepth:
+		nValue = constrain(nValue, 0, 99);
+		this->m_FXSpinLock.Acquire();
+		this->m_pMixingConsole->getPhaser()->setDepth(nValue / 99.0f);
+		this->m_FXSpinLock.Release();
+		break;
+	case TParameter::ParameterFXPhaserFeedback:
+		nValue = constrain(nValue, 0, 99);
+		this->m_FXSpinLock.Acquire();
+		this->m_pMixingConsole->getPhaser()->setFeedback(mapfloat(nValue, 0, 99, 0.0f, 0.97f));
+		this->m_FXSpinLock.Release();
+		break;
+	case TParameter::ParameterFXPhaserNbStages:
+		nValue = constrain(nValue, 2, MAX_NB_PHASES);
+		this->m_FXSpinLock.Acquire();
+		this->m_pMixingConsole->getPhaser()->setNbStages(nValue);
+		this->m_FXSpinLock.Release();
+		break;
+
+		// Delay parameters
+	case TParameter::ParameterFXDelayEnable:
+		this->m_FXSpinLock.Acquire();
+		this->m_pMixingConsole->getDelay()->setMute(!!!nValue);
+		this->m_FXSpinLock.Release();
+		break;
+	case TParameter::ParameterFXDelayLeftDelayTime:
+		nValue = constrain(nValue, -99, 99);
+		this->m_FXSpinLock.Acquire();
+		this->m_pMixingConsole->getDelay()->setLeftDelayTime(nValue / 99.0f);
+		this->m_FXSpinLock.Release();
+		break;
+	case TParameter::ParameterFXDelayRightDelayTime:
+		nValue = constrain(nValue, -99, 99);
+		this->m_FXSpinLock.Acquire();
+		this->m_pMixingConsole->getDelay()->setRightDelayTime(nValue / 99.0f);
+		this->m_FXSpinLock.Release();
+		break;
+	case TParameter::ParameterFXDelayFeedback:
+		nValue = constrain(nValue, 0, 99);
+		this->m_FXSpinLock.Acquire();
+		this->m_pMixingConsole->getDelay()->setFeedback(nValue / 99.0f);
+		this->m_FXSpinLock.Release();
+		break;
+
+		// AudioEffectPlateReverb parameters
 	case TParameter::ParameterReverbEnable:
-		this->m_FXSpinLock.Acquire ();
-		this->mixing_console_->getPlateReverb()->set_bypass (!!!nValue);
-		this->m_FXSpinLock.Release ();
+		this->m_FXSpinLock.Acquire();
+		this->m_pMixingConsole->getPlateReverb()->set_bypass(!!!nValue);
+		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterReverbSize:
-		nValue=constrain((int)nValue,0,99);
-		this->m_FXSpinLock.Acquire ();
-		this->mixing_console_->getPlateReverb()->size (nValue / 99.0f);
-		this->m_FXSpinLock.Release ();
+		nValue = constrain(nValue, 0, 99);
+		this->m_FXSpinLock.Acquire();
+		this->m_pMixingConsole->getPlateReverb()->size(nValue / 99.0f);
+		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterReverbHighDamp:
-		nValue=constrain((int)nValue,0,99);
-		this->m_FXSpinLock.Acquire ();
-		this->mixing_console_->getPlateReverb()->hidamp (nValue / 99.0f);
-		this->m_FXSpinLock.Release ();
+		nValue = constrain(nValue, 0, 99);
+		this->m_FXSpinLock.Acquire();
+		this->m_pMixingConsole->getPlateReverb()->hidamp(nValue / 99.0f);
+		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterReverbLowDamp:
-		nValue=constrain((int)nValue,0,99);
-		this->m_FXSpinLock.Acquire ();
-		this->mixing_console_->getPlateReverb()->lodamp (nValue / 99.0f);
-		this->m_FXSpinLock.Release ();
+		nValue = constrain(nValue, 0, 99);
+		this->m_FXSpinLock.Acquire();
+		this->m_pMixingConsole->getPlateReverb()->lodamp(nValue / 99.0f);
+		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterReverbLowPass:
-		nValue=constrain((int)nValue,0,99);
-		this->m_FXSpinLock.Acquire ();
-		this->mixing_console_->getPlateReverb()->lowpass (nValue / 99.0f);
-		this->m_FXSpinLock.Release ();
+		nValue = constrain(nValue, 0, 99);
+		this->m_FXSpinLock.Acquire();
+		this->m_pMixingConsole->getPlateReverb()->lowpass(nValue / 99.0f);
+		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterReverbDiffusion:
-		nValue=constrain((int)nValue,0,99);
-		this->m_FXSpinLock.Acquire ();
-		this->mixing_console_->getPlateReverb()->diffusion (nValue / 99.0f);
-		this->m_FXSpinLock.Release ();
+		nValue = constrain(nValue, 0, 99);
+		this->m_FXSpinLock.Acquire();
+		this->m_pMixingConsole->getPlateReverb()->diffusion(nValue / 99.0f);
+		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterReverbLevel:
-		nValue=constrain((int)nValue,0,99);
-		this->m_FXSpinLock.Acquire ();
-		this->mixing_console_->getPlateReverb()->level (nValue / 99.0f);
-		this->m_FXSpinLock.Release ();
-		break;
-
-	// Reverberator parameters
-	case TParameter::ParameterFXReverberatorEnable: 
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
-		this->mixing_console_->getReverberator()->setMute(!!!nValue);
-		this->m_FXSpinLock.Release();
-		break;
-	case TParameter::ParameterFXReverberatorInputGain: 
-		nValue = constrain((int)nValue, 0, 99);
-		this->m_FXSpinLock.Acquire();
-		this->mixing_console_->getReverberator()->setInputGain(nValue / 99.0f);
-		this->m_FXSpinLock.Release();
-		break;
-	case TParameter::ParameterFXReverberatorTime: 
-		nValue = constrain((int)nValue, 0, 99);
-		this->m_FXSpinLock.Acquire();
-		this->mixing_console_->getReverberator()->setTime(nValue / 99.0f);
-		this->m_FXSpinLock.Release();
-		break;
-	case TParameter::ParameterFXReverberatorDiffusion: 
-		nValue = constrain((int)nValue, 0, 99);
-		this->m_FXSpinLock.Acquire();
-		this->mixing_console_->getReverberator()->setDiffusion(nValue / 99.0f);
-		this->m_FXSpinLock.Release();
-		break;
-	case TParameter::ParameterFXReverberatorLP: 
-		nValue = constrain((int)nValue, 0, 99);
-		this->m_FXSpinLock.Acquire();
-		this->mixing_console_->getReverberator()->setLP(nValue / 99.0f);
+		this->m_pMixingConsole->getPlateReverb()->level(nValue / 99.0f);
 		this->m_FXSpinLock.Release();
 		break;
 
-	// Tube Send parameters
+		// Reverberator parameters
+	case TParameter::ParameterFXReverberatorEnable:
+		this->m_FXSpinLock.Acquire();
+		this->m_pMixingConsole->getReverberator()->setMute(!!!nValue);
+		this->m_FXSpinLock.Release();
+		break;
+	case TParameter::ParameterFXReverberatorInputGain:
+		nValue = constrain(nValue, 0, 99);
+		this->m_FXSpinLock.Acquire();
+		this->m_pMixingConsole->getReverberator()->setInputGain(nValue / 99.0f);
+		this->m_FXSpinLock.Release();
+		break;
+	case TParameter::ParameterFXReverberatorTime:
+		nValue = constrain(nValue, 0, 99);
+		this->m_FXSpinLock.Acquire();
+		this->m_pMixingConsole->getReverberator()->setTime(nValue / 99.0f);
+		this->m_FXSpinLock.Release();
+		break;
+	case TParameter::ParameterFXReverberatorDiffusion:
+		nValue = constrain(nValue, 0, 99);
+		this->m_FXSpinLock.Acquire();
+		this->m_pMixingConsole->getReverberator()->setDiffusion(nValue / 99.0f);
+		this->m_FXSpinLock.Release();
+		break;
+	case TParameter::ParameterFXReverberatorLP:
+		nValue = constrain(nValue, 0, 99);
+		this->m_FXSpinLock.Acquire();
+		this->m_pMixingConsole->getReverberator()->setLP(nValue / 99.0f);
+		this->m_FXSpinLock.Release();
+		break;
+
+		// Tube Send parameters
 	case TParameter::ParameterFXTube_ChorusSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Tube, MixerOutput::FX_Chorus, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXTube_FlangerSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Tube, MixerOutput::FX_Flanger, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXTube_OrbitoneSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Tube, MixerOutput::FX_Orbitone, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXTube_PhaserSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Tube, MixerOutput::FX_Phaser, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXTube_DelaySend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Tube, MixerOutput::FX_Delay, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXTube_PlateReverbSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Tube, MixerOutput::FX_PlateReverb, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXTube_ReverberatorSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Tube, MixerOutput::FX_Reverberator, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXTube_MainOutput:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Tube, MixerOutput::MainOutput, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 
-	// Chorus Send parameters
+		// Chorus Send parameters
 	case TParameter::ParameterFXChorus_TubeSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Chorus, MixerOutput::FX_Tube, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXChorus_FlangerSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Chorus, MixerOutput::FX_Flanger, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXChorus_OrbitoneSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Chorus, MixerOutput::FX_Orbitone, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXChorus_PhaserSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Chorus, MixerOutput::FX_Phaser, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXChorus_DelaySend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Chorus, MixerOutput::FX_Delay, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXChorus_PlateReverbSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Chorus, MixerOutput::FX_PlateReverb, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXChorus_ReverberatorSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Chorus, MixerOutput::FX_Reverberator, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXChorus_MainOutput:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Chorus, MixerOutput::MainOutput, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 
-	// Flanger Send parameters
+		// Flanger Send parameters
 	case TParameter::ParameterFXFlanger_TubeSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Flanger, MixerOutput::FX_Tube, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXFlanger_ChorusSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Flanger, MixerOutput::FX_Chorus, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXFlanger_OrbitoneSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Flanger, MixerOutput::FX_Orbitone, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXFlanger_PhaserSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Flanger, MixerOutput::FX_Phaser, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXFlanger_DelaySend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Flanger, MixerOutput::FX_Delay, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXFlanger_PlateReverbSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Flanger, MixerOutput::FX_PlateReverb, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXFlanger_ReverberatorSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Flanger, MixerOutput::FX_Reverberator, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXFlanger_MainOutput:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Flanger, MixerOutput::MainOutput, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 
-	// Orbitone Send parameters
+		// Orbitone Send parameters
 	case TParameter::ParameterFXOrbitone_TubeSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Orbitone, MixerOutput::FX_Tube, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXOrbitone_ChorusSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Orbitone, MixerOutput::FX_Chorus, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXOrbitone_FlangerSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Orbitone, MixerOutput::FX_Flanger, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXOrbitone_PhaserSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Orbitone, MixerOutput::FX_Phaser, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXOrbitone_DelaySend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Orbitone, MixerOutput::FX_Delay, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXOrbitone_PlateReverbSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Orbitone, MixerOutput::FX_PlateReverb, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXOrbitone_ReverberatorSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Orbitone, MixerOutput::FX_Reverberator, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXOrbitone_MainOutput:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Orbitone, MixerOutput::MainOutput, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 
-	// Phaser Send parameters
+		// Phaser Send parameters
 	case TParameter::ParameterFXPhaser_TubeSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Phaser, MixerOutput::FX_Tube, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXPhaser_ChorusSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Phaser, MixerOutput::FX_Chorus, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXPhaser_FlangerSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Phaser, MixerOutput::FX_Flanger, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXPhaser_OrbitoneSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Phaser, MixerOutput::FX_Orbitone, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXPhaser_DelaySend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Phaser, MixerOutput::FX_Delay, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXPhaser_PlateReverbSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Phaser, MixerOutput::FX_PlateReverb, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXPhaser_ReverberatorSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Phaser, MixerOutput::FX_Reverberator, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXPhaser_MainOutput:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Phaser, MixerOutput::MainOutput, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 
-	// Delay Send parameters
+		// Delay Send parameters
 	case TParameter::ParameterFXDelay_TubeSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Delay, MixerOutput::FX_Tube, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXDelay_ChorusSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Delay, MixerOutput::FX_Chorus, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXDelay_FlangerSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Delay, MixerOutput::FX_Flanger, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXDelay_OrbitoneSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Delay, MixerOutput::FX_Orbitone, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXDelay_PhaserSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Delay, MixerOutput::FX_Phaser, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXDelay_PlateReverbSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Delay, MixerOutput::FX_PlateReverb, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXDelay_ReverberatorSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Delay, MixerOutput::FX_Reverberator, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXDelay_MainOutput:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Delay, MixerOutput::MainOutput, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 
-	// Reverb Send parameters
+		// Reverb Send parameters
 	case TParameter::ParameterFXPlateReverb_TubeSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_PlateReverb, MixerOutput::FX_Tube, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXPlateReverb_ChorusSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_PlateReverb, MixerOutput::FX_Chorus, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXPlateReverb_FlangerSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_PlateReverb, MixerOutput::FX_Flanger, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXPlateReverb_OrbitoneSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_PlateReverb, MixerOutput::FX_Orbitone, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXPlateReverb_PhaserSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_PlateReverb, MixerOutput::FX_Phaser, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXPlateReverb_DelaySend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_PlateReverb, MixerOutput::FX_Delay, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXPlateReverb_ReverberatorSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_PlateReverb, MixerOutput::FX_Reverberator, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXPlateReverb_MainOutput:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_PlateReverb, MixerOutput::MainOutput, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 
-	// Reverberator Send parameters
+		// Reverberator Send parameters
 	case TParameter::ParameterFXReverberator_TubeSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Reverberator, MixerOutput::FX_Tube, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXReverberator_ChorusSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Reverberator, MixerOutput::FX_Chorus, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXReverberator_FlangerSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Reverberator, MixerOutput::FX_Flanger, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXReverberator_OrbitoneSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Reverberator, MixerOutput::FX_Orbitone, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXReverberator_PhaserSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Reverberator, MixerOutput::FX_Phaser, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXReverberator_DelaySend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Reverberator, MixerOutput::FX_Delay, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXReverberator_PlateReverbSend:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Reverberator, MixerOutput::FX_PlateReverb, nValue);
 		this->m_FXSpinLock.Release();
 		break;
 	case TParameter::ParameterFXReverberator_MainOutput:
-		nValue = constrain((int)nValue, 0, 99);
+		nValue = constrain(nValue, 0, 99);
 		this->m_FXSpinLock.Acquire();
 		this->setMixingConsoleFXSendLevel(MixerOutput::FX_Reverberator, MixerOutput::MainOutput, nValue);
 		this->m_FXSpinLock.Release();
@@ -1471,150 +1689,156 @@ void CMiniDexed::SetParameter (TParameter Parameter, int nValue)
 
 	case TParameter::ParameterFXBypass:
 		this->m_FXSpinLock.Acquire();
-		this->mixing_console_->bypass(!!nValue);
+		this->m_pMixingConsole->bypass(!!nValue);
 		this->m_FXSpinLock.Release();
 		break;
 
 #elif defined(PLATE_REVERB_ENABLE)
 
 	case TParameter::ParameterReverbEnable:
-		nValue=constrain((int)nValue,0,1);
-		m_FXSpinLock.Acquire ();
-		reverb->set_bypass (!nValue);
-		m_FXSpinLock.Release ();
+		nValue = constrain(nValue, 0, 1);
+		m_FXSpinLock.Acquire();
+		reverb->set_bypass(!nValue);
+		m_FXSpinLock.Release();
 		break;
 
 	case TParameter::ParameterReverbSize:
-		nValue=constrain((int)nValue,0,99);
-		m_FXSpinLock.Acquire ();
-		reverb->size (nValue / 99.0f);
-		m_FXSpinLock.Release ();
+		nValue = constrain(nValue, 0, 99);
+		m_FXSpinLock.Acquire();
+		reverb->size(nValue / 99.0f);
+		m_FXSpinLock.Release();
 		break;
 
 	case TParameter::ParameterReverbHighDamp:
-		nValue=constrain((int)nValue,0,99);
-		m_FXSpinLock.Acquire ();
-		reverb->hidamp (nValue / 99.0f);
-		m_FXSpinLock.Release ();
+		nValue = constrain(nValue, 0, 99);
+		m_FXSpinLock.Acquire();
+		reverb->hidamp(nValue / 99.0f);
+		m_FXSpinLock.Release();
 		break;
 
 	case TParameter::ParameterReverbLowDamp:
-		nValue=constrain((int)nValue,0,99);
-		m_FXSpinLock.Acquire ();
-		reverb->lodamp (nValue / 99.0f);
-		m_FXSpinLock.Release ();
+		nValue = constrain(nValue, 0, 99);
+		m_FXSpinLock.Acquire();
+		reverb->lodamp(nValue / 99.0f);
+		m_FXSpinLock.Release();
 		break;
 
 	case TParameter::ParameterReverbLowPass:
-		nValue=constrain((int)nValue,0,99);
-		m_FXSpinLock.Acquire ();
-		reverb->lowpass (nValue / 99.0f);
-		m_FXSpinLock.Release ();
+		nValue = constrain(nValue, 0, 99);
+		m_FXSpinLock.Acquire();
+		reverb->lowpass(nValue / 99.0f);
+		m_FXSpinLock.Release();
 		break;
 
 	case TParameter::ParameterReverbDiffusion:
-		nValue=constrain((int)nValue,0,99);
-		m_FXSpinLock.Acquire ();
-		reverb->diffusion (nValue / 99.0f);
-		m_FXSpinLock.Release ();
+		nValue = constrain(nValue, 0, 99);
+		m_FXSpinLock.Acquire();
+		reverb->diffusion(nValue / 99.0f);
+		m_FXSpinLock.Release();
 		break;
 
 	case TParameter::ParameterReverbLevel:
-		nValue=constrain((int)nValue,0,99);
-		m_FXSpinLock.Acquire ();
-		reverb->level (nValue / 99.0f);
-		m_FXSpinLock.Release ();
+		nValue = constrain(nValue, 0, 99);
+		m_FXSpinLock.Acquire();
+		reverb->level(nValue / 99.0f);
+		m_FXSpinLock.Release();
 		break;
-
 #endif
 
+	case ParameterPerformanceSelectChannel:
+		// Nothing more to do
+		break;
+
+	case ParameterPerformanceBank:
+		BankSelectPerformance(nValue);
+		break;
+
 	default:
-		assert (0);
+		assert(0);
 		break;
 	}
 }
 
-int CMiniDexed::GetParameter (TParameter Parameter)
+int CMiniDexed::GetParameter(TParameter Parameter)
 {
 	assert(Parameter < TParameter::ParameterUnknown);
 
 	return m_nParameter[Parameter];
 }
 
-void CMiniDexed::SetTGParameter (TTGParameter Parameter, int nValue, unsigned nTG)
+void CMiniDexed::SetTGParameter(TTGParameter Parameter, int nValue, unsigned nTG)
 {
-	assert (nTG < CConfig::ToneGenerators);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
 
-	switch (Parameter)
+	switch(Parameter)
 	{
-	case TTGParameter::TGParameterVoiceBank:			this->BankSelect (nValue, nTG);	break;
-	case TTGParameter::TGParameterVoiceBankMSB:			this->BankSelectMSB (nValue, nTG); break;
-	case TTGParameter::TGParameterVoiceBankLSB:			this->BankSelectLSB (nValue, nTG); break;
-	case TTGParameter::TGParameterProgram:				this->ProgramChange (nValue, nTG); break;
-	case TTGParameter::TGParameterVolume:				this->SetVolume (nValue, nTG); break;
-	case TTGParameter::TGParameterPan:					this->SetPan (nValue, nTG); break;
-	case TTGParameter::TGParameterMasterTune:			this->SetMasterTune (nValue, nTG); break;
-	case TTGParameter::TGParameterCutoff:				this->SetCutoff (nValue, nTG); break;
-	case TTGParameter::TGParameterResonance:			this->SetResonance (nValue, nTG); break;
-	case TTGParameter::TGParameterPitchBendRange:		this->setPitchbendRange (nValue, nTG); break;
-	case TTGParameter::TGParameterPitchBendStep:		this->setPitchbendStep (nValue, nTG); break;
-	case TTGParameter::TGParameterPortamentoMode:		this->setPortamentoMode (nValue, nTG); break;
-	case TTGParameter::TGParameterPortamentoGlissando:	this->setPortamentoGlissando (nValue, nTG); break;
-	case TTGParameter::TGParameterPortamentoTime:		this->setPortamentoTime (nValue, nTG); break;
-	case TTGParameter::TGParameterMonoMode:				this->setMonoMode (nValue , nTG); break; 
-	
+	case TTGParameter::TGParameterVoiceBank:			this->BankSelect(nValue, nTG);	break;
+	case TTGParameter::TGParameterVoiceBankMSB:			this->BankSelectMSB(nValue, nTG); break;
+	case TTGParameter::TGParameterVoiceBankLSB:			this->BankSelectLSB(nValue, nTG); break;
+	case TTGParameter::TGParameterProgram:				this->ProgramChange(nValue, nTG); break;
+	case TTGParameter::TGParameterVolume:				this->SetVolume(nValue, nTG); break;
+	case TTGParameter::TGParameterPan:					this->SetPan(nValue, nTG); break;
+	case TTGParameter::TGParameterMasterTune:			this->SetMasterTune(nValue, nTG); break;
+	case TTGParameter::TGParameterCutoff:				this->SetCutoff(nValue, nTG); break;
+	case TTGParameter::TGParameterResonance:			this->SetResonance(nValue, nTG); break;
+	case TTGParameter::TGParameterPitchBendRange:		this->setPitchbendRange(nValue, nTG); break;
+	case TTGParameter::TGParameterPitchBendStep:		this->setPitchbendStep(nValue, nTG); break;
+	case TTGParameter::TGParameterPortamentoMode:		this->setPortamentoMode(nValue, nTG); break;
+	case TTGParameter::TGParameterPortamentoGlissando:	this->setPortamentoGlissando(nValue, nTG); break;
+	case TTGParameter::TGParameterPortamentoTime:		this->setPortamentoTime(nValue, nTG); break;
+	case TTGParameter::TGParameterMonoMode:				this->setMonoMode(nValue, nTG); break;
+
 	case TTGParameter::TGParameterMWRange:				this->setModController(0, 0, nValue, nTG); break;
 	case TTGParameter::TGParameterMWPitch:				this->setModController(0, 1, nValue, nTG); break;
 	case TTGParameter::TGParameterMWAmplitude:			this->setModController(0, 2, nValue, nTG); break;
 	case TTGParameter::TGParameterMWEGBias:				this->setModController(0, 3, nValue, nTG); break;
-	
+
 	case TTGParameter::TGParameterFCRange:				this->setModController(1, 0, nValue, nTG); break;
 	case TTGParameter::TGParameterFCPitch:				this->setModController(1, 1, nValue, nTG); break;
 	case TTGParameter::TGParameterFCAmplitude:			this->setModController(1, 2, nValue, nTG); break;
 	case TTGParameter::TGParameterFCEGBias:				this->setModController(1, 3, nValue, nTG); break;
-	
+
 	case TTGParameter::TGParameterBCRange:				this->setModController(2, 0, nValue, nTG); break;
 	case TTGParameter::TGParameterBCPitch:				this->setModController(2, 1, nValue, nTG); break;
 	case TTGParameter::TGParameterBCAmplitude:			this->setModController(2, 2, nValue, nTG); break;
 	case TTGParameter::TGParameterBCEGBias:				this->setModController(2, 3, nValue, nTG); break;
-	
+
 	case TTGParameter::TGParameterATRange:				this->setModController(3, 0, nValue, nTG); break;
 	case TTGParameter::TGParameterATPitch:				this->setModController(3, 1, nValue, nTG); break;
 	case TTGParameter::TGParameterATAmplitude:			this->setModController(3, 2, nValue, nTG); break;
 	case TTGParameter::TGParameterATEGBias:				this->setModController(3, 3, nValue, nTG); break;
-	
+
 	case TTGParameter::TGParameterMIDIChannel:
-		assert (0 <= nValue && nValue <= 255);
-		SetMIDIChannel ((uint8_t) nValue, nTG);
+		assert(0 <= nValue && nValue <= 255);
+		SetMIDIChannel((uint8_t)nValue, nTG);
 		break;
 
 #if defined(MIXING_CONSOLE_ENABLE)
-	case TTGParameter::TGParameterMixingSendFXTube:			this->setMixingConsoleSendLevel(nTG, MixerOutput::FX_Tube, 			nValue); break;
-	case TTGParameter::TGParameterMixingSendFXChorus:		this->setMixingConsoleSendLevel(nTG, MixerOutput::FX_Chorus, 		nValue); break;
-	case TTGParameter::TGParameterMixingSendFXFlanger:		this->setMixingConsoleSendLevel(nTG, MixerOutput::FX_Flanger, 		nValue); break;
-	case TTGParameter::TGParameterMixingSendFXOrbitone:		this->setMixingConsoleSendLevel(nTG, MixerOutput::FX_Orbitone, 		nValue); break;
-	case TTGParameter::TGParameterMixingSendFXPhaser:		this->setMixingConsoleSendLevel(nTG, MixerOutput::FX_Phaser, 		nValue); break;
-	case TTGParameter::TGParameterMixingSendFXDelay:		this->setMixingConsoleSendLevel(nTG, MixerOutput::FX_Delay, 		nValue); break;
-	case TTGParameter::TGParameterMixingSendFXPlateReverb:	this->setMixingConsoleSendLevel(nTG, MixerOutput::FX_PlateReverb, 	nValue); break;
-	case TTGParameter::TGParameterMixingSendFXReverberator:	this->setMixingConsoleSendLevel(nTG, MixerOutput::FX_Reverberator, 	nValue); break;
-	case TTGParameter::TGParameterMixingSendFXMainOutput:	this->setMixingConsoleSendLevel(nTG, MixerOutput::MainOutput, 		nValue); break;
+	case TTGParameter::TGParameterMixingSendFXTube:			this->setMixingConsoleSendLevel(nTG, MixerOutput::FX_Tube, nValue); break;
+	case TTGParameter::TGParameterMixingSendFXChorus:		this->setMixingConsoleSendLevel(nTG, MixerOutput::FX_Chorus, nValue); break;
+	case TTGParameter::TGParameterMixingSendFXFlanger:		this->setMixingConsoleSendLevel(nTG, MixerOutput::FX_Flanger, nValue); break;
+	case TTGParameter::TGParameterMixingSendFXOrbitone:		this->setMixingConsoleSendLevel(nTG, MixerOutput::FX_Orbitone, nValue); break;
+	case TTGParameter::TGParameterMixingSendFXPhaser:		this->setMixingConsoleSendLevel(nTG, MixerOutput::FX_Phaser, nValue); break;
+	case TTGParameter::TGParameterMixingSendFXDelay:		this->setMixingConsoleSendLevel(nTG, MixerOutput::FX_Delay, nValue); break;
+	case TTGParameter::TGParameterMixingSendFXPlateReverb:	this->setMixingConsoleSendLevel(nTG, MixerOutput::FX_PlateReverb, nValue); break;
+	case TTGParameter::TGParameterMixingSendFXReverberator:	this->setMixingConsoleSendLevel(nTG, MixerOutput::FX_Reverberator, nValue); break;
+	case TTGParameter::TGParameterMixingSendFXMainOutput:	this->setMixingConsoleSendLevel(nTG, MixerOutput::MainOutput, nValue); break;
 #elif defined(PLATE_REVERB_ENABLE)
-	case TTGParameter::TGParameterReverbSend:				this->SetReverbSend (nValue, nTG); break;
+	case TTGParameter::TGParameterReverbSend:				this->SetReverbSend(nValue, nTG); break;
 #endif // MIXING_CONSOLE_ENABLE
 
 	default:
-		assert (0);
+		assert(0);
 		break;
 	}
-
-	this->m_UI.ParameterChanged();
 }
 
-int CMiniDexed::GetTGParameter (TTGParameter Parameter, unsigned nTG)
+int CMiniDexed::GetTGParameter(TTGParameter Parameter, unsigned nTG)
 {
-	assert (nTG < CConfig::ToneGenerators);
+	assert(nTG < CConfig::AllToneGenerators);
 
-	switch (Parameter)
+	switch(Parameter)
 	{
 	case TTGParameter::TGParameterVoiceBank:				return m_nVoiceBankID[nTG];
 	case TTGParameter::TGParameterVoiceBankMSB:				return m_nVoiceBankID[nTG] >> 7;
@@ -1644,45 +1868,47 @@ int CMiniDexed::GetTGParameter (TTGParameter Parameter, unsigned nTG)
 	case TTGParameter::TGParameterPortamentoMode:			return m_nPortamentoMode[nTG];
 	case TTGParameter::TGParameterPortamentoGlissando:		return m_nPortamentoGlissando[nTG];
 	case TTGParameter::TGParameterPortamentoTime:			return m_nPortamentoTime[nTG];
-	case TTGParameter::TGParameterMonoMode:					return m_bMonoMode[nTG] ? 1 : 0; 
-	
+	case TTGParameter::TGParameterMonoMode:					return m_bMonoMode[nTG] ? 1 : 0;
+
 	case TTGParameter::TGParameterMWRange:					return getModController(0, 0, nTG);
 	case TTGParameter::TGParameterMWPitch:					return getModController(0, 1, nTG);
-	case TTGParameter::TGParameterMWAmplitude:				return getModController(0, 2, nTG); 
-	case TTGParameter::TGParameterMWEGBias:					return getModController(0, 3, nTG); 
-	
-	case TTGParameter::TGParameterFCRange:					return getModController(1, 0,  nTG); 
-	case TTGParameter::TGParameterFCPitch:					return getModController(1, 1,  nTG); 
-	case TTGParameter::TGParameterFCAmplitude:				return getModController(1, 2,  nTG); 
-	case TTGParameter::TGParameterFCEGBias:					return getModController(1, 3,  nTG); 
-	
-	case TTGParameter::TGParameterBCRange:					return getModController(2, 0,  nTG); 
-	case TTGParameter::TGParameterBCPitch:					return getModController(2, 1,  nTG); 
-	case TTGParameter::TGParameterBCAmplitude:				return getModController(2, 2,  nTG); 
-	case TTGParameter::TGParameterBCEGBias:					return getModController(2, 3,  nTG); 
-	
-	case TTGParameter::TGParameterATRange:					return getModController(3, 0,  nTG); 
-	case TTGParameter::TGParameterATPitch:					return getModController(3, 1,  nTG); 
-	case TTGParameter::TGParameterATAmplitude:				return getModController(3, 2,  nTG); 
-	case TTGParameter::TGParameterATEGBias:					return getModController(3, 3,  nTG); 
-		
+	case TTGParameter::TGParameterMWAmplitude:				return getModController(0, 2, nTG);
+	case TTGParameter::TGParameterMWEGBias:					return getModController(0, 3, nTG);
+
+	case TTGParameter::TGParameterFCRange:					return getModController(1, 0, nTG);
+	case TTGParameter::TGParameterFCPitch:					return getModController(1, 1, nTG);
+	case TTGParameter::TGParameterFCAmplitude:				return getModController(1, 2, nTG);
+	case TTGParameter::TGParameterFCEGBias:					return getModController(1, 3, nTG);
+
+	case TTGParameter::TGParameterBCRange:					return getModController(2, 0, nTG);
+	case TTGParameter::TGParameterBCPitch:					return getModController(2, 1, nTG);
+	case TTGParameter::TGParameterBCAmplitude:				return getModController(2, 2, nTG);
+	case TTGParameter::TGParameterBCEGBias:					return getModController(2, 3, nTG);
+
+	case TTGParameter::TGParameterATRange:					return getModController(3, 0, nTG);
+	case TTGParameter::TGParameterATPitch:					return getModController(3, 1, nTG);
+	case TTGParameter::TGParameterATAmplitude:				return getModController(3, 2, nTG);
+	case TTGParameter::TGParameterATEGBias:					return getModController(3, 3, nTG);
+
 	default:
-		assert (0);
+		assert(0);
 		return 0;
 	}
 }
 
-void CMiniDexed::SetVoiceParameter (uint8_t uchOffset, uint8_t uchValue, unsigned nOP, unsigned nTG)
+void CMiniDexed::SetVoiceParameter(uint8_t uchOffset, uint8_t uchValue, unsigned nOP, unsigned nTG)
 {
-	assert (nTG < CConfig::ToneGenerators);
-	assert (m_pTG[nTG]);
-	assert (nOP <= 6);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
 
-	if (nOP < 6)
+	assert(m_pTG[nTG]);
+	assert(nOP <= 6);
+
+	if(nOP < 6)
 	{
-		if (uchOffset == DEXED_OP_ENABLE)
+		if(uchOffset == DEXED_OP_ENABLE)
 		{
-			if (uchValue)
+			if(uchValue)
 			{
 				m_uchOPMask[nTG] |= 1 << nOP;
 			}
@@ -1691,7 +1917,7 @@ void CMiniDexed::SetVoiceParameter (uint8_t uchOffset, uint8_t uchValue, unsigne
 				m_uchOPMask[nTG] &= ~(1 << nOP);
 			}
 
-			m_pTG[nTG]->setOPAll (m_uchOPMask[nTG]);
+			m_pTG[nTG]->setOPAll(m_uchOPMask[nTG]);
 
 			return;
 		}
@@ -1700,20 +1926,22 @@ void CMiniDexed::SetVoiceParameter (uint8_t uchOffset, uint8_t uchValue, unsigne
 	}
 
 	uchOffset += nOP * 21;
-	assert (uchOffset < 156);
+	assert(uchOffset < 156);
 
-	m_pTG[nTG]->setVoiceDataElement (uchOffset, uchValue);
+	m_pTG[nTG]->setVoiceDataElement(uchOffset, uchValue);
 }
 
-uint8_t CMiniDexed::GetVoiceParameter (uint8_t uchOffset, unsigned nOP, unsigned nTG)
+uint8_t CMiniDexed::GetVoiceParameter(uint8_t uchOffset, unsigned nOP, unsigned nTG)
 {
-	assert (nTG < CConfig::ToneGenerators);
-	assert (m_pTG[nTG]);
-	assert (nOP <= 6);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return 0;  // Not an active TG
 
-	if (nOP < 6)
+	assert(m_pTG[nTG]);
+	assert(nOP <= 6);
+
+	if(nOP < 6)
 	{
-		if (uchOffset == DEXED_OP_ENABLE)
+		if(uchOffset == DEXED_OP_ENABLE)
 		{
 			return !!(m_uchOPMask[nTG] & (1 << nOP));
 		}
@@ -1722,97 +1950,100 @@ uint8_t CMiniDexed::GetVoiceParameter (uint8_t uchOffset, unsigned nOP, unsigned
 	}
 
 	uchOffset += nOP * 21;
-	assert (uchOffset < 156);
+	assert(uchOffset < 156);
 
-	return m_pTG[nTG]->getVoiceDataElement (uchOffset);
+	return m_pTG[nTG]->getVoiceDataElement(uchOffset);
 }
 
-std::string CMiniDexed::GetVoiceName (unsigned nTG)
+std::string CMiniDexed::GetVoiceName(unsigned nTG)
 {
 	char VoiceName[11];
-	memset (VoiceName, 0, sizeof VoiceName);
+	memset(VoiceName, 0, sizeof VoiceName);
+	VoiceName[0] = 32; // space
+	assert(nTG < CConfig::AllToneGenerators);
 
-	assert (nTG < CConfig::ToneGenerators);
-	assert (m_pTG[nTG]);
-	m_pTG[nTG]->setName (VoiceName);
-
-	std::string Result (VoiceName);
-
+	if(nTG < m_nToneGenerators)
+	{
+		assert(m_pTG[nTG]);
+		m_pTG[nTG]->setName(VoiceName);
+	}
+	std::string Result(VoiceName);
 	return Result;
 }
 
 #ifndef ARM_ALLOW_MULTI_CORE
 
-void CMiniDexed::ProcessSound (void)
+void CMiniDexed::ProcessSound(void)
 {
-	assert (m_pSoundDevice);
+	assert(m_pSoundDevice);
 
-	unsigned nFrames = m_nQueueSizeFrames - m_pSoundDevice->GetQueueFramesAvail ();
-	if (nFrames >= m_nQueueSizeFrames/2)
+	unsigned nFrames = m_nQueueSizeFrames - m_pSoundDevice->GetQueueFramesAvail();
+	if(nFrames >= m_nQueueSizeFrames / 2)
 	{
-		if (m_bProfileEnabled)
+		if(m_bProfileEnabled)
 		{
-			m_GetChunkTimer.Start ();
+			m_GetChunkTimer.Start();
 		}
 
 		float32_t SampleBuffer[nFrames];
-		m_pTG[0]->getSamples (SampleBuffer, nFrames);
+		m_pTG[0]->getSamples(SampleBuffer, nFrames);
 
 		// Convert single float array (mono) to int16 array
 		int16_t tmp_int[nFrames];
-		arm_float_to_q15(SampleBuffer,tmp_int,nFrames);
+		arm_float_to_q15(SampleBuffer, tmp_int, nFrames);
 
-		if (m_pSoundDevice->Write (tmp_int, sizeof(tmp_int)) != (int) sizeof(tmp_int))
+		if(m_pSoundDevice->Write(tmp_int, sizeof(tmp_int)) != (int)sizeof(tmp_int))
 		{
-			LOGERR ("Sound data dropped");
+			LOGERR("Sound data dropped");
 		}
 
-		if (m_bProfileEnabled)
+		if(m_bProfileEnabled)
 		{
-			m_GetChunkTimer.Stop ();
+			m_GetChunkTimer.Stop();
 		}
 	}
 }
 
 #else	// #ifdef ARM_ALLOW_MULTI_CORE
 
-void CMiniDexed::ProcessSound (void)
+void CMiniDexed::ProcessSound(void)
 {
-	assert (m_pSoundDevice);
+	assert(m_pSoundDevice);
+	assert(m_pConfig);
 
-	unsigned nFrames = m_nQueueSizeFrames - m_pSoundDevice->GetQueueFramesAvail ();
-	if (nFrames >= m_nQueueSizeFrames/2)
+	unsigned nFrames = m_nQueueSizeFrames - m_pSoundDevice->GetQueueFramesAvail();
+	if(nFrames >= m_nQueueSizeFrames / 2)
 	{
-		if (m_bProfileEnabled)
+		if(m_bProfileEnabled)
 		{
-			m_GetChunkTimer.Start ();
+			m_GetChunkTimer.Start();
 		}
 
 		m_nFramesToProcess = nFrames;
 
 		// kick secondary cores
-		for (unsigned nCore = 2; nCore < CORES; nCore++)
+		for(unsigned nCore = 2; nCore < CORES; nCore++)
 		{
-			assert (m_CoreStatus[nCore] == CoreStatusIdle);
+			assert(m_CoreStatus[nCore] == CoreStatusIdle);
 			m_CoreStatus[nCore] = CoreStatusBusy;
 		}
 
 		// process the TGs assigned to core 1
-		assert (nFrames <= CConfig::MaxChunkSize);
-		for (unsigned i = 0; i < CConfig::TGsCore1; i++)
+		assert(nFrames <= CConfig::MaxChunkSize);
+		for(unsigned i = 0; i < m_pConfig->GetTGsCore1(); i++)
 		{
-			assert (m_pTG[i]);
-			m_pTG[i]->getSamples (m_OutputLevel[i], nFrames);
+			assert(m_pTG[i]);
+			m_pTG[i]->getSamples(m_OutputLevel[i], nFrames);
 
 #if defined(MIXING_CONSOLE_ENABLE)
-			this->mixing_console_->preProcessInputSampleBuffer(i, nFrames);
+			this->m_pMixingConsole->preProcessInputSampleBuffer(i, nFrames);
 #endif
 		}
 
 		// wait for cores 2 and 3 to complete their work
-		for (unsigned nCore = 2; nCore < CORES; nCore++)
+		for(unsigned nCore = 2; nCore < CORES; nCore++)
 		{
-			while (m_CoreStatus[nCore] != CoreStatusIdle)
+			while(m_CoreStatus[nCore] != CoreStatusIdle)
 			{
 				// just wait
 			}
@@ -1820,164 +2051,256 @@ void CMiniDexed::ProcessSound (void)
 
 		//
 		// Audio signal path after tone generators starts here
-		int16_t tmp_int[nFrames * 2];
+		//
+
+		if(m_bQuadDAC8Chan)
+		{
+			// This is only supported when there are 8 TGs
+			assert(m_nToneGenerators == 8);
+
+			// No mixing is performed by MiniDexed, sound is output in 8 channels.
+			// Note: one TG per audio channel; output=mono; no processing.
+			const int Channels = 8;  // One TG per channel
+			float32_t tmp_float[nFrames * Channels];
+			int16_t tmp_int[nFrames * Channels];
+
+			if(nMasterVolume > 0.0)
+			{
+				// Convert dual float array (8 chan) to single int16 array (8 chan)
+				for(uint16_t i = 0; i < nFrames;i++)
+				{
+					// TGs will alternate on L/R channels for each output
+					// reading directly from the TG OutputLevel buffer with
+					// no additional processing.
+					for(uint8_t tg = 0; tg < Channels; tg++)
+					{
+						if(nMasterVolume > 0.0 && nMasterVolume < 1.0)
+						{
+							tmp_float[(i * Channels) + tg] = m_OutputLevel[tg][i] * nMasterVolume;
+						}
+						else if(nMasterVolume == 1.0)
+						{
+							tmp_float[(i * Channels) + tg] = m_OutputLevel[tg][i];
+						}
+					}
+				}
+				arm_float_to_q15(tmp_float, tmp_int, nFrames * Channels);
+			}
+			else
+			{
+				arm_fill_q15(0, tmp_int, nFrames * Channels);
+			}
+
+			if(m_pSoundDevice->Write(tmp_int, sizeof(tmp_int)) != (int)sizeof(tmp_int))
+			{
+				LOGERR("Sound data dropped");
+			}
+		}
+		else
+		{
+			//
+			// Audio signal path after tone generators starts here
+			int16_t tmp_int[nFrames * 2];
 
 #if defined(MIXING_CONSOLE_ENABLE)
-		// BEGIN mixing
-		if(this->nMasterVolume > 0.0f)
-		{
-			// temp buffering and channel indexing
-			float32_t interlacedSampleBuffer[nFrames << 1];
-
-			this->m_FXSpinLock.Acquire();
-			this->mixing_console_->process(interlacedSampleBuffer);
-			this->m_FXSpinLock.Release();
-
-			if(this->nMasterVolume < 1.0f)
+			// BEGIN mixing
+			if(this->nMasterVolume > 0.0f)
 			{
-				arm_scale_f32(interlacedSampleBuffer, this->nMasterVolume, interlacedSampleBuffer, nFrames << 1);
+				// temp buffering and channel indexing
+				float32_t interlacedSampleBuffer[nFrames << 1];
+
+				this->m_FXSpinLock.Acquire();
+				this->m_pMixingConsole->process(interlacedSampleBuffer);
+				this->m_FXSpinLock.Release();
+
+				if(this->nMasterVolume < 1.0f)
+				{
+					arm_scale_f32(interlacedSampleBuffer, this->nMasterVolume, interlacedSampleBuffer, nFrames << 1);
+				}
+
+				// Convert float array (left, right) to single int16 array (left/right)
+				arm_float_to_q15(interlacedSampleBuffer, tmp_int, nFrames << 1);
 			}
-			
-			// Convert float array (left, right) to single int16 array (left/right)
-			arm_float_to_q15(interlacedSampleBuffer, tmp_int, nFrames << 1);
-		}
-		else // this->nMasterVolume == 0.0f
-		{
-			arm_fill_q15(0, tmp_int, nFrames << 1);
-		}
+			else // this->nMasterVolume == 0.0f
+			{
+				arm_fill_q15(0, tmp_int, nFrames << 1);
+			}
 
 #elif defined(PLATE_REVERB_ENABLE)
 
-		uint8_t indexL=0, indexR=1;
-		
-		// BEGIN TG mixing
-		float32_t tmp_float[nFrames*2];
+			// Mix everything down to stereo		
+			uint8_t indexL = 0, indexR = 1;
 
-		if(nMasterVolume > 0.0f)
-		{
-			for (uint8_t i = 0; i < CConfig::ToneGenerators; i++)
+			// BEGIN TG mixing
+			float32_t tmp_float[nFrames * 2];
+
+			if(nMasterVolume > 0.0)
 			{
-				tg_mixer->doAddMix(i,m_OutputLevel[i]);
-				reverb_send_mixer->doAddMix(i,m_OutputLevel[i]);
-			}
-			// END TG mixing
-	
-			// BEGIN create SampleBuffer for holding audio data
-			float32_t SampleBuffer[2][nFrames];
-			// END create SampleBuffer for holding audio data
-
-			// get the mix of all TGs
-			tg_mixer->getMix(SampleBuffer[indexL], SampleBuffer[indexR]);
-
-			// BEGIN adding reverb
-			if (m_nParameter[ParameterReverbEnable])
-			{
-				float32_t ReverbBuffer[2][nFrames];
-				float32_t ReverbSendBuffer[2][nFrames];
-
-				arm_fill_f32(0.0f, ReverbBuffer[indexL], nFrames);
-				arm_fill_f32(0.0f, ReverbBuffer[indexR], nFrames);
-				arm_fill_f32(0.0f, ReverbSendBuffer[indexR], nFrames);
-				arm_fill_f32(0.0f, ReverbSendBuffer[indexL], nFrames);
-	
-				m_FXSpinLock.Acquire ();
-	
-				reverb_send_mixer->getMix(ReverbSendBuffer[indexL], ReverbSendBuffer[indexR]);
-				reverb->doReverb(ReverbSendBuffer[indexL],ReverbSendBuffer[indexR],ReverbBuffer[indexL], ReverbBuffer[indexR],nFrames);
-	
-				// scale down and add left reverb buffer by reverb level 
-				arm_scale_f32(ReverbBuffer[indexL], reverb->get_level(), ReverbBuffer[indexL], nFrames);
-				arm_add_f32(SampleBuffer[indexL], ReverbBuffer[indexL], SampleBuffer[indexL], nFrames);
-				// scale down and add right reverb buffer by reverb level 
-				arm_scale_f32(ReverbBuffer[indexR], reverb->get_level(), ReverbBuffer[indexR], nFrames);
-				arm_add_f32(SampleBuffer[indexR], ReverbBuffer[indexR], SampleBuffer[indexR], nFrames);
-	
-				m_FXSpinLock.Release ();
-			}
-			// END adding reverb
-	
-			// swap stereo channels if needed prior to writing back out
-			if (m_bChannelsSwapped)
-			{
-				indexL=1;
-				indexR=0;
-			}
-
-			// Convert dual float array (left, right) to single int16 array (left/right)
-			for(uint16_t i=0; i<nFrames;i++)
-			{
-				if(nMasterVolume >0.0 && nMasterVolume <1.0)
+				for(uint8_t i = 0; i < m_nToneGenerators; i++)
 				{
-					tmp_float[i*2]=SampleBuffer[indexL][i] * nMasterVolume;
-					tmp_float[(i*2)+1]=SampleBuffer[indexR][i] * nMasterVolume;
+					tg_mixer->doAddMix(i, m_OutputLevel[i]);
+					reverb_send_mixer->doAddMix(i, m_OutputLevel[i]);
 				}
-				else if(nMasterVolume == 1.0)
+				// END TG mixing
+
+				// BEGIN create SampleBuffer for holding audio data
+				float32_t SampleBuffer[2][nFrames];
+				// END create SampleBuffer for holding audio data
+
+					// get the mix of all TGs
+				tg_mixer->getMix(SampleBuffer[indexL], SampleBuffer[indexR]);
+
+				// BEGIN adding reverb
+				if(m_nParameter[ParameterReverbEnable])
 				{
-					tmp_float[i*2]=SampleBuffer[indexL][i];
-					tmp_float[(i*2)+1]=SampleBuffer[indexR][i];
+					float32_t ReverbBuffer[2][nFrames];
+					float32_t ReverbSendBuffer[2][nFrames];
+
+					arm_fill_f32(0.0f, ReverbBuffer[indexL], nFrames);
+					arm_fill_f32(0.0f, ReverbBuffer[indexR], nFrames);
+					arm_fill_f32(0.0f, ReverbSendBuffer[indexR], nFrames);
+					arm_fill_f32(0.0f, ReverbSendBuffer[indexL], nFrames);
+
+					m_FXSpinLock.Acquire();
+
+					reverb_send_mixer->getMix(ReverbSendBuffer[indexL], ReverbSendBuffer[indexR]);
+					reverb->doReverb(ReverbSendBuffer[indexL], ReverbSendBuffer[indexR], ReverbBuffer[indexL], ReverbBuffer[indexR], nFrames);
+
+					// scale down and add left reverb buffer by reverb level 
+					arm_scale_f32(ReverbBuffer[indexL], reverb->get_level(), ReverbBuffer[indexL], nFrames);
+					arm_add_f32(SampleBuffer[indexL], ReverbBuffer[indexL], SampleBuffer[indexL], nFrames);
+					// scale down and add right reverb buffer by reverb level 
+					arm_scale_f32(ReverbBuffer[indexR], reverb->get_level(), ReverbBuffer[indexR], nFrames);
+					arm_add_f32(SampleBuffer[indexR], ReverbBuffer[indexR], SampleBuffer[indexR], nFrames);
+
+					m_FXSpinLock.Release();
 				}
+				// END adding reverb
+
+				// swap stereo channels if needed prior to writing back out
+				if(m_bChannelsSwapped)
+				{
+					indexL = 1;
+					indexR = 0;
+				}
+
+				// Convert dual float array (left, right) to single int16 array (left/right)
+				for(uint16_t i = 0; i < nFrames; i++)
+				{
+					if(nMasterVolume > 0.0 && nMasterVolume < 1.0)
+					{
+						tmp_float[i * 2] = SampleBuffer[indexL][i] * nMasterVolume;
+						tmp_float[(i * 2) + 1] = SampleBuffer[indexR][i] * nMasterVolume;
+					}
+					else if(nMasterVolume == 1.0)
+					{
+						tmp_float[i * 2] = SampleBuffer[indexL][i];
+						tmp_float[(i * 2) + 1] = SampleBuffer[indexR][i];
+					}
+				}
+				arm_float_to_q15(tmp_float, tmp_int, nFrames * 2);
 			}
-			arm_float_to_q15(tmp_float,tmp_int,nFrames*2);
-		}
-		else
-			arm_fill_q15(0, tmp_int, nFrames * 2);
+			else
+			{
+				arm_fill_q15(0, tmp_int, nFrames * 2);
+			}
 #endif
 
-		if(this->m_pSoundDevice->Write(tmp_int, sizeof(tmp_int)) != (int)sizeof(tmp_int))
-		{
-			LOGERR ("Sound data dropped");
-		}
+			if(this->m_pSoundDevice->Write(tmp_int, sizeof(tmp_int)) != (int)sizeof(tmp_int))
+			{
+				LOGERR("Sound data dropped");
+			}
+		} // End of Stereo mixing
 
 		if(this->m_bProfileEnabled)
 		{
-			this->m_GetChunkTimer.Stop ();
+			this->m_GetChunkTimer.Stop();
 		}
 	}
 }
 
 #endif
 
-bool CMiniDexed::SavePerformance (bool bSaveAsDeault)
+unsigned CMiniDexed::GetPerformanceSelectChannel(void)
 {
-	m_bSavePerformance = true;
-	m_bSaveAsDeault=bSaveAsDeault;
-
-	return true;
+	// Stores and returns Select Channel using MIDI Device Channel definitions
+	return (unsigned)GetParameter(ParameterPerformanceSelectChannel);
 }
 
-bool CMiniDexed::DoSavePerformance (void)
+void CMiniDexed::SetPerformanceSelectChannel(unsigned uCh)
 {
-	for (unsigned nTG = 0; nTG < CConfig::ToneGenerators; nTG++)
+	// Turns a configuration setting to MIDI Device Channel definitions
+	// Mirrors the logic in Performance Config for handling MIDI channel configuration
+	if(uCh == 0)
 	{
-		m_PerformanceConfig.SetBankNumber (m_nVoiceBankID[nTG], nTG);
-		m_PerformanceConfig.SetVoiceNumber (m_nProgram[nTG], nTG);
-		m_PerformanceConfig.SetMIDIChannel (m_nMIDIChannel[nTG], nTG);
-		m_PerformanceConfig.SetVolume (m_nVolume[nTG], nTG);
-		m_PerformanceConfig.SetPan (m_nPan[nTG], nTG);
-		m_PerformanceConfig.SetDetune (m_nMasterTune[nTG], nTG);
-		m_PerformanceConfig.SetCutoff (m_nCutoff[nTG], nTG);
-		m_PerformanceConfig.SetResonance (m_nResonance[nTG], nTG);
-		m_PerformanceConfig.SetPitchBendRange (m_nPitchBendRange[nTG], nTG);
-		m_PerformanceConfig.SetPitchBendStep	(m_nPitchBendStep[nTG], nTG);
-		m_PerformanceConfig.SetPortamentoMode (m_nPortamentoMode[nTG], nTG);
-		m_PerformanceConfig.SetPortamentoGlissando (m_nPortamentoGlissando[nTG], nTG);
-		m_PerformanceConfig.SetPortamentoTime (m_nPortamentoTime[nTG], nTG);
+		SetParameter(ParameterPerformanceSelectChannel, CMIDIDevice::Disabled);
+	}
+	else if(uCh < CMIDIDevice::Channels)
+	{
+		SetParameter(ParameterPerformanceSelectChannel, uCh - 1);
+	}
+	else
+	{
+		SetParameter(ParameterPerformanceSelectChannel, CMIDIDevice::OmniMode);
+	}
+}
 
-		m_PerformanceConfig.SetNoteLimitLow (m_nNoteLimitLow[nTG], nTG);
-		m_PerformanceConfig.SetNoteLimitHigh (m_nNoteLimitHigh[nTG], nTG);
-		m_PerformanceConfig.SetNoteShift (m_nNoteShift[nTG], nTG);
-		m_pTG[nTG]->getVoiceData(m_nRawVoiceData);  
- 		m_PerformanceConfig.SetVoiceDataToTxt (m_nRawVoiceData, nTG); 
-		m_PerformanceConfig.SetMonoMode (m_bMonoMode[nTG], nTG); 
-				
-		m_PerformanceConfig.SetModulationWheelRange (m_nModulationWheelRange[nTG], nTG);
-		m_PerformanceConfig.SetModulationWheelTarget (m_nModulationWheelTarget[nTG], nTG);
-		m_PerformanceConfig.SetFootControlRange (m_nFootControlRange[nTG], nTG);
-		m_PerformanceConfig.SetFootControlTarget (m_nFootControlTarget[nTG], nTG);
-		m_PerformanceConfig.SetBreathControlRange (m_nBreathControlRange[nTG], nTG);
-		m_PerformanceConfig.SetBreathControlTarget (m_nBreathControlTarget[nTG], nTG);
-		m_PerformanceConfig.SetAftertouchRange (m_nAftertouchRange[nTG], nTG);
-		m_PerformanceConfig.SetAftertouchTarget (m_nAftertouchTarget[nTG], nTG);
+bool CMiniDexed::SavePerformance(bool bSaveAsDeault)
+{
+	if(m_PerformanceConfig.GetInternalFolderOk())
+	{
+		m_bSavePerformance = true;
+		m_bSaveAsDeault = bSaveAsDeault;
+
+		return true;
+	}
+	else
+	{
+		return false;
+	}
+}
+
+bool CMiniDexed::DoSavePerformance(void)
+{
+	for(unsigned nTG = 0; nTG < CConfig::AllToneGenerators; nTG++)
+	{
+		m_PerformanceConfig.SetBankNumber(m_nVoiceBankID[nTG], nTG);
+		m_PerformanceConfig.SetVoiceNumber(m_nProgram[nTG], nTG);
+		m_PerformanceConfig.SetMIDIChannel(m_nMIDIChannel[nTG], nTG);
+		m_PerformanceConfig.SetVolume(m_nVolume[nTG], nTG);
+		m_PerformanceConfig.SetPan(m_nPan[nTG], nTG);
+		m_PerformanceConfig.SetDetune(m_nMasterTune[nTG], nTG);
+		m_PerformanceConfig.SetCutoff(m_nCutoff[nTG], nTG);
+		m_PerformanceConfig.SetResonance(m_nResonance[nTG], nTG);
+		m_PerformanceConfig.SetPitchBendRange(m_nPitchBendRange[nTG], nTG);
+		m_PerformanceConfig.SetPitchBendStep(m_nPitchBendStep[nTG], nTG);
+		m_PerformanceConfig.SetPortamentoMode(m_nPortamentoMode[nTG], nTG);
+		m_PerformanceConfig.SetPortamentoGlissando(m_nPortamentoGlissando[nTG], nTG);
+		m_PerformanceConfig.SetPortamentoTime(m_nPortamentoTime[nTG], nTG);
+
+		m_PerformanceConfig.SetNoteLimitLow(m_nNoteLimitLow[nTG], nTG);
+		m_PerformanceConfig.SetNoteLimitHigh(m_nNoteLimitHigh[nTG], nTG);
+		m_PerformanceConfig.SetNoteShift(m_nNoteShift[nTG], nTG);
+		if(nTG < m_pConfig->GetToneGenerators())
+		{
+			m_pTG[nTG]->getVoiceData(m_nRawVoiceData);
+		}
+		else
+		{
+			// Not an active TG so provide default voice by asking for an invalid voice ID.
+			m_SysExFileLoader.GetVoice(CSysExFileLoader::MaxVoiceBankID, CSysExFileLoader::VoicesPerBank + 1, m_nRawVoiceData);
+		}
+		m_PerformanceConfig.SetVoiceDataToTxt(m_nRawVoiceData, nTG);
+		m_PerformanceConfig.SetMonoMode(m_bMonoMode[nTG], nTG);
+
+		m_PerformanceConfig.SetModulationWheelRange(m_nModulationWheelRange[nTG], nTG);
+		m_PerformanceConfig.SetModulationWheelTarget(m_nModulationWheelTarget[nTG], nTG);
+		m_PerformanceConfig.SetFootControlRange(m_nFootControlRange[nTG], nTG);
+		m_PerformanceConfig.SetFootControlTarget(m_nFootControlTarget[nTG], nTG);
+		m_PerformanceConfig.SetBreathControlRange(m_nBreathControlRange[nTG], nTG);
+		m_PerformanceConfig.SetBreathControlTarget(m_nBreathControlTarget[nTG], nTG);
+		m_PerformanceConfig.SetAftertouchRange(m_nAftertouchRange[nTG], nTG);
+		m_PerformanceConfig.SetAftertouchTarget(m_nAftertouchTarget[nTG], nTG);
 
 #if defined(MIXING_CONSOLE_ENABLE)
 		for(size_t fx = 0; fx < MixerOutput::kFXCount; ++fx)
@@ -1987,19 +2310,19 @@ bool CMiniDexed::DoSavePerformance (void)
 #endif
 
 #if defined(PLATE_REVERB_ENABLE)
-		m_PerformanceConfig.SetReverbSend (m_nReverbSend[nTG], nTG);
+		m_PerformanceConfig.SetReverbSend(m_nReverbSend[nTG], nTG);
 #endif
 	}
 
-	m_PerformanceConfig.SetCompressorEnable (!!m_nParameter[TParameter::ParameterCompressorEnable]);
+	m_PerformanceConfig.SetCompressorEnable(!!m_nParameter[TParameter::ParameterCompressorEnable]);
 #if defined(MIXING_CONSOLE_ENABLE) || defined(PLATE_REVERB_ENABLE) 
-	m_PerformanceConfig.SetReverbEnable (!!m_nParameter[TParameter::ParameterReverbEnable]);
-	m_PerformanceConfig.SetReverbSize (m_nParameter[TParameter::ParameterReverbSize]);
-	m_PerformanceConfig.SetReverbHighDamp (m_nParameter[TParameter::ParameterReverbHighDamp]);
-	m_PerformanceConfig.SetReverbLowDamp (m_nParameter[TParameter::ParameterReverbLowDamp]);
-	m_PerformanceConfig.SetReverbLowPass (m_nParameter[TParameter::ParameterReverbLowPass]);
-	m_PerformanceConfig.SetReverbDiffusion (m_nParameter[TParameter::ParameterReverbDiffusion]);
-	m_PerformanceConfig.SetReverbLevel (m_nParameter[TParameter::ParameterReverbLevel]);
+	m_PerformanceConfig.SetReverbEnable(!!m_nParameter[TParameter::ParameterReverbEnable]);
+	m_PerformanceConfig.SetReverbSize(m_nParameter[TParameter::ParameterReverbSize]);
+	m_PerformanceConfig.SetReverbHighDamp(m_nParameter[TParameter::ParameterReverbHighDamp]);
+	m_PerformanceConfig.SetReverbLowDamp(m_nParameter[TParameter::ParameterReverbLowDamp]);
+	m_PerformanceConfig.SetReverbLowPass(m_nParameter[TParameter::ParameterReverbLowPass]);
+	m_PerformanceConfig.SetReverbDiffusion(m_nParameter[TParameter::ParameterReverbDiffusion]);
+	m_PerformanceConfig.SetReverbLevel(m_nParameter[TParameter::ParameterReverbLevel]);
 #endif
 
 #ifdef MIXING_CONSOLE_ENABLE
@@ -2108,224 +2431,258 @@ bool CMiniDexed::DoSavePerformance (void)
 	this->m_PerformanceConfig.SetFXSendLevel(MixerOutput::FX_Reverberator, MixerOutput::FX_PlateReverb, this->m_nParameter[TParameter::ParameterFXReverberator_PlateReverbSend]);
 	this->m_PerformanceConfig.SetFXSendLevel(MixerOutput::FX_Reverberator, MixerOutput::MainOutput, this->m_nParameter[TParameter::ParameterFXReverberator_MainOutput]);
 
-	this->m_PerformanceConfig.SetFXBypass(this->mixing_console_->bypass());
+	this->m_PerformanceConfig.SetFXBypass(this->m_pMixingConsole->bypass());
 
 #endif
 
 	if(m_bSaveAsDeault)
 	{
 		m_PerformanceConfig.SetNewPerformance(0);
-		
+
 	}
-	return m_PerformanceConfig.Save ();
+	return m_PerformanceConfig.Save();
 }
 
 void CMiniDexed::setMonoMode(uint8_t mono, uint8_t nTG)
 {
-	assert (nTG < CConfig::ToneGenerators);
-	assert (m_pTG[nTG]);
-	m_bMonoMode[nTG]= mono != 0; 
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
+
+	assert(m_pTG[nTG]);
+	m_bMonoMode[nTG] = mono != 0;
 	m_pTG[nTG]->setMonoMode(constrain(mono, 0, 1));
 	m_pTG[nTG]->doRefreshVoice();
-	m_UI.ParameterChanged ();
+	m_UI.ParameterChanged();
 }
 
 void CMiniDexed::setPitchbendRange(uint8_t range, uint8_t nTG)
 {
-	range = constrain (range, 0, 12);
-	assert (nTG < CConfig::ToneGenerators);
-	assert (m_pTG[nTG]);
+	range = constrain(range, 0, 12);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
+
+	assert(m_pTG[nTG]);
 	m_nPitchBendRange[nTG] = range;
-	
+
 	m_pTG[nTG]->setPitchbendRange(range);
 	m_pTG[nTG]->ControllersRefresh();
-	m_UI.ParameterChanged ();
+	m_UI.ParameterChanged();
 }
 
 void CMiniDexed::setPitchbendStep(uint8_t step, uint8_t nTG)
 {
-	step= constrain (step, 0, 12);
-	assert (nTG < CConfig::ToneGenerators);
-	assert (m_pTG[nTG]);
+	step = constrain(step, 0, 12);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
+
+	assert(m_pTG[nTG]);
 	m_nPitchBendStep[nTG] = step;
-	
+
 	m_pTG[nTG]->setPitchbendStep(step);
 	m_pTG[nTG]->ControllersRefresh();
-	m_UI.ParameterChanged ();
+	m_UI.ParameterChanged();
 }
 
 void CMiniDexed::setPortamentoMode(uint8_t mode, uint8_t nTG)
 {
-	mode= constrain (mode, 0, 1);
+	mode = constrain(mode, 0, 1);
 
-	assert (nTG < CConfig::ToneGenerators);
-	assert (m_pTG[nTG]);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
+
+	assert(m_pTG[nTG]);
 	m_nPortamentoMode[nTG] = mode;
-	
+
 	m_pTG[nTG]->setPortamentoMode(mode);
 	m_pTG[nTG]->ControllersRefresh();
-	m_UI.ParameterChanged ();
+	m_UI.ParameterChanged();
 }
 
 void CMiniDexed::setPortamentoGlissando(uint8_t glissando, uint8_t nTG)
 {
-	glissando = constrain (glissando, 0, 1);
-	assert (nTG < CConfig::ToneGenerators);
-	assert (m_pTG[nTG]);
+	glissando = constrain(glissando, 0, 1);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
+
+	assert(m_pTG[nTG]);
 	m_nPortamentoGlissando[nTG] = glissando;
-	
+
 	m_pTG[nTG]->setPortamentoGlissando(glissando);
 	m_pTG[nTG]->ControllersRefresh();
-	m_UI.ParameterChanged ();
+	m_UI.ParameterChanged();
 }
 
 void CMiniDexed::setPortamentoTime(uint8_t time, uint8_t nTG)
 {
-	time = constrain (time, 0, 99);
-	assert (nTG < CConfig::ToneGenerators);
-	assert (m_pTG[nTG]);
+	time = constrain(time, 0, 99);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
+
+	assert(m_pTG[nTG]);
 	m_nPortamentoTime[nTG] = time;
-	
+
 	m_pTG[nTG]->setPortamentoTime(time);
 	m_pTG[nTG]->ControllersRefresh();
-	m_UI.ParameterChanged ();
+	m_UI.ParameterChanged();
 }
 
 void CMiniDexed::setModWheelRange(uint8_t range, uint8_t nTG)
 {
-	assert (nTG < CConfig::ToneGenerators);
-	assert (m_pTG[nTG]);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
+
+	assert(m_pTG[nTG]);
 
 	m_nModulationWheelRange[nTG] = range;
 	m_pTG[nTG]->setMWController(range, m_pTG[nTG]->getModWheelTarget(), 0);
-//	m_pTG[nTG]->setModWheelRange(constrain(range, 0, 99));  replaces with the above due to wrong constrain on dexed_synth module. 
+	//	m_pTG[nTG]->setModWheelRange(constrain(range, 0, 99));  replaces with the above due to wrong constrain on dexed_synth module. 
 
 	m_pTG[nTG]->ControllersRefresh();
-	m_UI.ParameterChanged ();
+	m_UI.ParameterChanged();
 }
 
 void CMiniDexed::setModWheelTarget(uint8_t target, uint8_t nTG)
 {
-	assert (nTG < CConfig::ToneGenerators);
-	assert (m_pTG[nTG]);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
+
+	assert(m_pTG[nTG]);
 
 	m_nModulationWheelTarget[nTG] = target;
 
 	m_pTG[nTG]->setModWheelTarget(constrain(target, 0, 7));
 	m_pTG[nTG]->ControllersRefresh();
-	m_UI.ParameterChanged ();
+	m_UI.ParameterChanged();
 }
 
 void CMiniDexed::setFootControllerRange(uint8_t range, uint8_t nTG)
 {
-	assert (nTG < CConfig::ToneGenerators);
-	assert (m_pTG[nTG]);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
 
-	m_nFootControlRange[nTG]=range;
+	assert(m_pTG[nTG]);
+
+	m_nFootControlRange[nTG] = range;
 	m_pTG[nTG]->setFCController(range, m_pTG[nTG]->getFootControllerTarget(), 0);
-//	m_pTG[nTG]->setFootControllerRange(constrain(range, 0, 99));  replaces with the above due to wrong constrain on dexed_synth module. 
+	//	m_pTG[nTG]->setFootControllerRange(constrain(range, 0, 99));  replaces with the above due to wrong constrain on dexed_synth module. 
 
 	m_pTG[nTG]->ControllersRefresh();
-	m_UI.ParameterChanged ();
+	m_UI.ParameterChanged();
 }
 
 void CMiniDexed::setFootControllerTarget(uint8_t target, uint8_t nTG)
 {
-	assert (nTG < CConfig::ToneGenerators);
-	assert (m_pTG[nTG]);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
+
+	assert(m_pTG[nTG]);
 
 	m_nFootControlTarget[nTG] = target;
 
 	m_pTG[nTG]->setFootControllerTarget(constrain(target, 0, 7));
 	m_pTG[nTG]->ControllersRefresh();
-	m_UI.ParameterChanged ();
+	m_UI.ParameterChanged();
 }
 
 void CMiniDexed::setBreathControllerRange(uint8_t range, uint8_t nTG)
 {
-	assert (nTG < CConfig::ToneGenerators);
-	assert (m_pTG[nTG]);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
 
-	m_nBreathControlRange[nTG]=range;
+	assert(m_pTG[nTG]);
+
+	m_nBreathControlRange[nTG] = range;
 	m_pTG[nTG]->setBCController(range, m_pTG[nTG]->getBreathControllerTarget(), 0);
 	//m_pTG[nTG]->setBreathControllerRange(constrain(range, 0, 99));
 
 	m_pTG[nTG]->ControllersRefresh();
-	m_UI.ParameterChanged ();
+	m_UI.ParameterChanged();
 }
 
 void CMiniDexed::setBreathControllerTarget(uint8_t target, uint8_t nTG)
 {
-	assert (nTG < CConfig::ToneGenerators);
-	assert (m_pTG[nTG]);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
 
-	m_nBreathControlTarget[nTG]=target;
+	assert(m_pTG[nTG]);
+
+	m_nBreathControlTarget[nTG] = target;
 
 	m_pTG[nTG]->setBreathControllerTarget(constrain(target, 0, 7));
 	m_pTG[nTG]->ControllersRefresh();
-	m_UI.ParameterChanged ();
+	m_UI.ParameterChanged();
 }
 
 void CMiniDexed::setAftertouchRange(uint8_t range, uint8_t nTG)
 {
-	assert (nTG < CConfig::ToneGenerators);
-	assert (m_pTG[nTG]);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
 
-	m_nAftertouchRange[nTG]=range;
+	assert(m_pTG[nTG]);
+
+	m_nAftertouchRange[nTG] = range;
 	m_pTG[nTG]->setATController(range, m_pTG[nTG]->getAftertouchTarget(), 0);
-//	m_pTG[nTG]->setAftertouchRange(constrain(range, 0, 99));
+	//	m_pTG[nTG]->setAftertouchRange(constrain(range, 0, 99));
 
 	m_pTG[nTG]->ControllersRefresh();
-	m_UI.ParameterChanged ();
+	m_UI.ParameterChanged();
 }
 
 void CMiniDexed::setAftertouchTarget(uint8_t target, uint8_t nTG)
 {
-	assert (nTG < CConfig::ToneGenerators);
-	assert (m_pTG[nTG]);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
 
-	m_nAftertouchTarget[nTG]=target;
+	assert(m_pTG[nTG]);
+
+	m_nAftertouchTarget[nTG] = target;
 
 	m_pTG[nTG]->setAftertouchTarget(constrain(target, 0, 7));
 	m_pTG[nTG]->ControllersRefresh();
-	m_UI.ParameterChanged ();
+	m_UI.ParameterChanged();
 }
 
 void CMiniDexed::loadVoiceParameters(const uint8_t* data, uint8_t nTG)
 {
-	assert (nTG < CConfig::ToneGenerators);
-	assert (m_pTG[nTG]);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
+
+	assert(m_pTG[nTG]);
 
 	uint8_t voice[161];
 
-	memcpy(voice, data, sizeof(uint8_t)*161);
+	memcpy(voice, data, sizeof(uint8_t) * 161);
 
 	// fix voice name
-	for (uint8_t i = 0; i < 10; i++)
+	for(uint8_t i = 0; i < 10; i++)
 	{
-		if (voice[151 + i] > 126) // filter characters
+		if(voice[151 + i] > 126) // filter characters
 			voice[151 + i] = 32;
 	}
 
 	m_pTG[nTG]->loadVoiceParameters(&voice[6]);
 	m_pTG[nTG]->doRefreshVoice();
-	m_UI.ParameterChanged ();
+	m_UI.ParameterChanged();
 }
 
 void CMiniDexed::setVoiceDataElement(uint8_t data, uint8_t number, uint8_t nTG)
 {
-	assert (nTG < CConfig::ToneGenerators);
-	assert (m_pTG[nTG]);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
 
-	m_pTG[nTG]->setVoiceDataElement(constrain(data, 0, 155),constrain(number, 0, 99));
+	assert(m_pTG[nTG]);
+
+	m_pTG[nTG]->setVoiceDataElement(constrain(data, 0, 155), constrain(number, 0, 99));
 	//m_pTG[nTG]->doRefreshVoice();
-	m_UI.ParameterChanged ();
+	m_UI.ParameterChanged();
 }
 
-int16_t CMiniDexed::checkSystemExclusive(const uint8_t* pMessage,const  uint16_t nLength, uint8_t nTG)
+int16_t CMiniDexed::checkSystemExclusive(const uint8_t* pMessage, const  uint16_t nLength, uint8_t nTG)
 {
-	assert (nTG < CConfig::ToneGenerators);
-	assert (m_pTG[nTG]);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return 0;  // Not an active TG
+
+	assert(m_pTG[nTG]);
 
 	return(m_pTG[nTG]->checkSystemExclusive(pMessage, nLength));
 }
@@ -2335,10 +2692,17 @@ void CMiniDexed::getSysExVoiceDump(uint8_t* dest, uint8_t nTG)
 	uint8_t checksum = 0;
 	uint8_t data[155];
 
-	assert (nTG < CConfig::ToneGenerators);
-	assert (m_pTG[nTG]);
-
-	m_pTG[nTG]->getVoiceData(data);
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG < m_nToneGenerators)
+	{
+		assert(m_pTG[nTG]);
+		m_pTG[nTG]->getVoiceData(data);
+	}
+	else
+	{
+		// Not an active TG so grab a default voice
+		m_SysExFileLoader.GetVoice(CSysExFileLoader::MaxVoiceBankID, CSysExFileLoader::VoicesPerBank + 1, data);
+	}
 
 	dest[0] = 0xF0; // SysEx start
 	dest[1] = 0x43; // ID=Yamaha
@@ -2346,7 +2710,7 @@ void CMiniDexed::getSysExVoiceDump(uint8_t* dest, uint8_t nTG)
 	dest[3] = 0x00; // Format number (0=1 voice)
 	dest[4] = 0x01; // Byte count MSB
 	dest[5] = 0x1B; // Byte count LSB
-	for (uint8_t n = 0; n < 155; n++)
+	for(uint8_t n = 0; n < 155; n++)
 	{
 		checksum -= data[n];
 		dest[6 + n] = data[n];
@@ -2355,14 +2719,14 @@ void CMiniDexed::getSysExVoiceDump(uint8_t* dest, uint8_t nTG)
 	dest[162] = 0xF7; // SysEx end
 }
 
-void CMiniDexed::setMasterVolume (float32_t vol)
+void CMiniDexed::setMasterVolume(float32_t vol)
 {
 	this->nMasterVolume = constrain(vol, 0.0f, 1.0f);
-			
-				   
-			
 
-				   
+
+
+
+
 }
 
 std::string CMiniDexed::GetPerformanceFileName(unsigned nID)
@@ -2380,7 +2744,15 @@ unsigned CMiniDexed::GetLastPerformance()
 	return m_PerformanceConfig.GetLastPerformance();
 }
 
+unsigned CMiniDexed::GetPerformanceBank()
+{
+	return m_PerformanceConfig.GetPerformanceBank();
+}
 
+unsigned CMiniDexed::GetLastPerformanceBank()
+{
+	return m_PerformanceConfig.GetLastPerformanceBank();
+}
 
 unsigned CMiniDexed::GetActualPerformanceID()
 {
@@ -2392,6 +2764,16 @@ void CMiniDexed::SetActualPerformanceID(unsigned nID)
 	m_PerformanceConfig.SetActualPerformanceID(nID);
 }
 
+unsigned CMiniDexed::GetActualPerformanceBankID()
+{
+	return m_PerformanceConfig.GetActualPerformanceBankID();
+}
+
+void CMiniDexed::SetActualPerformanceBankID(unsigned nBankID)
+{
+	m_PerformanceConfig.SetActualPerformanceBankID(nBankID);
+}
+
 bool CMiniDexed::SetNewPerformance(unsigned nID)
 {
 	m_bSetNewPerformance = true;
@@ -2400,14 +2782,28 @@ bool CMiniDexed::SetNewPerformance(unsigned nID)
 	return true;
 }
 
-bool CMiniDexed::DoSetNewPerformance (void)
+bool CMiniDexed::SetNewPerformanceBank(unsigned nBankID)
+{
+	m_bSetNewPerformanceBank = true;
+	m_nSetNewPerformanceBankID = nBankID;
+
+	return true;
+}
+
+void CMiniDexed::SetFirstPerformance(void)
+{
+	m_bSetFirstPerformance = true;
+	return;
+}
+
+bool CMiniDexed::DoSetNewPerformance(void)
 {
 	m_bLoadPerformanceBusy = true;
-	
+
 	unsigned nID = m_nSetNewPerformanceID;
 	m_PerformanceConfig.SetNewPerformance(nID);
-	
-	if (m_PerformanceConfig.Load ())
+
+	if(m_PerformanceConfig.Load())
 	{
 		LoadPerformanceParameters();
 		m_bLoadPerformanceBusy = false;
@@ -2415,21 +2811,40 @@ bool CMiniDexed::DoSetNewPerformance (void)
 	}
 	else
 	{
-		SetMIDIChannel (CMIDIDevice::OmniMode, 0);
+		SetMIDIChannel(CMIDIDevice::OmniMode, 0);
 		m_bLoadPerformanceBusy = false;
 		return false;
 	}
 }
 
-bool CMiniDexed::SavePerformanceNewFile ()
+bool CMiniDexed::DoSetNewPerformanceBank(void)
+{
+	m_bLoadPerformanceBankBusy = true;
+
+	unsigned nBankID = m_nSetNewPerformanceBankID;
+	m_PerformanceConfig.SetNewPerformanceBank(nBankID);
+
+	m_bLoadPerformanceBankBusy = false;
+	return true;
+}
+
+void CMiniDexed::DoSetFirstPerformance(void)
+{
+	unsigned nID = m_PerformanceConfig.FindFirstPerformance();
+	SetNewPerformance(nID);
+	m_bSetFirstPerformance = false;
+	return;
+}
+
+bool CMiniDexed::SavePerformanceNewFile()
 {
 	m_bSavePerformanceNewFile = m_PerformanceConfig.GetInternalFolderOk() && m_PerformanceConfig.CheckFreePerformanceSlot();
 	return m_bSavePerformanceNewFile;
 }
 
-bool CMiniDexed::DoSavePerformanceNewFile (void)
+bool CMiniDexed::DoSavePerformanceNewFile(void)
 {
-	if (m_PerformanceConfig.CreateNewPerformanceFile())
+	if(m_PerformanceConfig.CreateNewPerformanceFile())
 	{
 		if(SavePerformance(false))
 		{
@@ -2444,107 +2859,87 @@ bool CMiniDexed::DoSavePerformanceNewFile (void)
 	{
 		return false;
 	}
-	
-}
 
+}
 
 void CMiniDexed::LoadPerformanceParameters(void)
 {
-	for (unsigned nTG = 0; nTG < CConfig::ToneGenerators; nTG++)
+	for(unsigned nTG = 0; nTG < CConfig::AllToneGenerators; nTG++)
 	{
-   
-		BankSelect (m_PerformanceConfig.GetBankNumber (nTG), nTG);
-		ProgramChange (m_PerformanceConfig.GetVoiceNumber (nTG), nTG);
-		SetMIDIChannel (m_PerformanceConfig.GetMIDIChannel (nTG), nTG);
-		SetVolume (m_PerformanceConfig.GetVolume (nTG), nTG);
-		SetPan (m_PerformanceConfig.GetPan (nTG), nTG);
-		SetMasterTune (m_PerformanceConfig.GetDetune (nTG), nTG);
-		SetCutoff (m_PerformanceConfig.GetCutoff (nTG), nTG);
-		SetResonance (m_PerformanceConfig.GetResonance (nTG), nTG);
-		setPitchbendRange (m_PerformanceConfig.GetPitchBendRange (nTG), nTG);
-		setPitchbendStep (m_PerformanceConfig.GetPitchBendStep (nTG), nTG);
-		setPortamentoMode (m_PerformanceConfig.GetPortamentoMode (nTG), nTG);
-		setPortamentoGlissando (m_PerformanceConfig.GetPortamentoGlissando  (nTG), nTG);
-		setPortamentoTime (m_PerformanceConfig.GetPortamentoTime (nTG), nTG);
 
-		m_nNoteLimitLow[nTG] = m_PerformanceConfig.GetNoteLimitLow (nTG);
-		m_nNoteLimitHigh[nTG] = m_PerformanceConfig.GetNoteLimitHigh (nTG);
-		m_nNoteShift[nTG] = m_PerformanceConfig.GetNoteShift (nTG);
-   
-												
-	
-																	  
-												
-	
-																   
-																
-	 
-																			  
-																				
-																				
-																				  
-																					
-																					  
-																		   
-																			 
-   
-		
-		if(m_PerformanceConfig.VoiceDataFilled(nTG)) 
+		BankSelect(m_PerformanceConfig.GetBankNumber(nTG), nTG);
+		ProgramChange(m_PerformanceConfig.GetVoiceNumber(nTG), nTG);
+		SetMIDIChannel(m_PerformanceConfig.GetMIDIChannel(nTG), nTG);
+		SetVolume(m_PerformanceConfig.GetVolume(nTG), nTG);
+		SetPan(m_PerformanceConfig.GetPan(nTG), nTG);
+		SetMasterTune(m_PerformanceConfig.GetDetune(nTG), nTG);
+		SetCutoff(m_PerformanceConfig.GetCutoff(nTG), nTG);
+		SetResonance(m_PerformanceConfig.GetResonance(nTG), nTG);
+		setPitchbendRange(m_PerformanceConfig.GetPitchBendRange(nTG), nTG);
+		setPitchbendStep(m_PerformanceConfig.GetPitchBendStep(nTG), nTG);
+		setPortamentoMode(m_PerformanceConfig.GetPortamentoMode(nTG), nTG);
+		setPortamentoGlissando(m_PerformanceConfig.GetPortamentoGlissando(nTG), nTG);
+		setPortamentoTime(m_PerformanceConfig.GetPortamentoTime(nTG), nTG);
+
+		m_nNoteLimitLow[nTG] = m_PerformanceConfig.GetNoteLimitLow(nTG);
+		m_nNoteLimitHigh[nTG] = m_PerformanceConfig.GetNoteLimitHigh(nTG);
+		m_nNoteShift[nTG] = m_PerformanceConfig.GetNoteShift(nTG);
+
+		if(m_PerformanceConfig.VoiceDataFilled(nTG))
 		{
-		uint8_t* tVoiceData = m_PerformanceConfig.GetVoiceDataFromTxt(nTG);
-		m_pTG[nTG]->loadVoiceParameters(tVoiceData); 
+			uint8_t* tVoiceData = m_PerformanceConfig.GetVoiceDataFromTxt(nTG);
+			m_pTG[nTG]->loadVoiceParameters(tVoiceData);
 		}
-		setMonoMode(m_PerformanceConfig.GetMonoMode(nTG) ? 1 : 0, nTG); 
-			
-		this->SetParameter(TParameter::ParameterCompressorEnable, this->m_PerformanceConfig.GetCompressorEnable());
+		setMonoMode(m_PerformanceConfig.GetMonoMode(nTG) ? 1 : 0, nTG);
+
 #if defined(MIXING_CONSOLE_ENABLE)
 		for(size_t fx = 0; fx < MixerOutput::kFXCount; ++fx)
 		{
 			this->setMixingConsoleSendLevel(nTG, static_cast<MixerOutput>(fx), this->m_PerformanceConfig.GetTGSendLevel(nTG, static_cast<MixerOutput>(fx)));
 		}
 #elif defined(PLATE_REVERB_ENABLE)
-		SetReverbSend (m_PerformanceConfig.GetReverbSend (nTG), nTG);
+		SetReverbSend(m_PerformanceConfig.GetReverbSend(nTG), nTG);
 #endif
 
-		setModWheelRange (m_PerformanceConfig.GetModulationWheelRange (nTG),  nTG);
-		setModWheelTarget (m_PerformanceConfig.GetModulationWheelTarget (nTG),  nTG);
-		setFootControllerRange (m_PerformanceConfig.GetFootControlRange (nTG),  nTG);
-		setFootControllerTarget (m_PerformanceConfig.GetFootControlTarget (nTG),  nTG);
-		setBreathControllerRange (m_PerformanceConfig.GetBreathControlRange (nTG),  nTG);
-		setBreathControllerTarget (m_PerformanceConfig.GetBreathControlTarget (nTG),  nTG);
-		setAftertouchRange (m_PerformanceConfig.GetAftertouchRange (nTG),  nTG);
-		setAftertouchTarget (m_PerformanceConfig.GetAftertouchTarget (nTG),  nTG);
+		setModWheelRange(m_PerformanceConfig.GetModulationWheelRange(nTG), nTG);
+		setModWheelTarget(m_PerformanceConfig.GetModulationWheelTarget(nTG), nTG);
+		setFootControllerRange(m_PerformanceConfig.GetFootControlRange(nTG), nTG);
+		setFootControllerTarget(m_PerformanceConfig.GetFootControlTarget(nTG), nTG);
+		setBreathControllerRange(m_PerformanceConfig.GetBreathControlRange(nTG), nTG);
+		setBreathControllerTarget(m_PerformanceConfig.GetBreathControlTarget(nTG), nTG);
+		setAftertouchRange(m_PerformanceConfig.GetAftertouchRange(nTG), nTG);
+		setAftertouchTarget(m_PerformanceConfig.GetAftertouchTarget(nTG), nTG);
 	}
 
-#ifdef MIXING_CONSOLE_ENABLE
-	this->SetParameter(TParameter::ParameterFXTubeEnable, this->m_PerformanceConfig.GetFXTubeEnable());
+#if defined(MIXING_CONSOLE_ENABLE)
+	this->SetParameter(TParameter::ParameterFXTubeEnable, this->m_PerformanceConfig.GetFXTubeEnable() ? 1 : 0);
 	this->SetParameter(TParameter::ParameterFXTubeOverdrive, this->m_PerformanceConfig.GetFXTubeOverdrive());
 
-	this->SetParameter(TParameter::ParameterFXChorusEnable, this->m_PerformanceConfig.GetFXChorusEnable());
+	this->SetParameter(TParameter::ParameterFXChorusEnable, this->m_PerformanceConfig.GetFXChorusEnable() ? 1 : 0);
 	this->SetParameter(TParameter::ParameterFXChorusRate, this->m_PerformanceConfig.GetFXChorusRate());
 	this->SetParameter(TParameter::ParameterFXChorusDepth, this->m_PerformanceConfig.GetFXChorusDepth());
 
-	this->SetParameter(TParameter::ParameterFXFlangerEnable, this->m_PerformanceConfig.GetFXFlangerEnable());
+	this->SetParameter(TParameter::ParameterFXFlangerEnable, this->m_PerformanceConfig.GetFXFlangerEnable() ? 1 : 0);
 	this->SetParameter(TParameter::ParameterFXFlangerRate, this->m_PerformanceConfig.GetFXFlangerRate());
 	this->SetParameter(TParameter::ParameterFXFlangerDepth, this->m_PerformanceConfig.GetFXFlangerDepth());
 	this->SetParameter(TParameter::ParameterFXFlangerFeedback, this->m_PerformanceConfig.GetFXFlangerFeedback());
 
-	this->SetParameter(TParameter::ParameterFXOrbitoneEnable, this->m_PerformanceConfig.GetFXOrbitoneEnable());
+	this->SetParameter(TParameter::ParameterFXOrbitoneEnable, this->m_PerformanceConfig.GetFXOrbitoneEnable() ? 1 : 0);
 	this->SetParameter(TParameter::ParameterFXOrbitoneRate, this->m_PerformanceConfig.GetFXOrbitoneRate());
 	this->SetParameter(TParameter::ParameterFXOrbitoneDepth, this->m_PerformanceConfig.GetFXOrbitoneDepth());
 
-	this->SetParameter(TParameter::ParameterFXPhaserEnable, this->m_PerformanceConfig.GetFXPhaserEnable());
+	this->SetParameter(TParameter::ParameterFXPhaserEnable, this->m_PerformanceConfig.GetFXPhaserEnable() ? 1 : 0);
 	this->SetParameter(TParameter::ParameterFXPhaserRate, this->m_PerformanceConfig.GetFXPhaserRate());
 	this->SetParameter(TParameter::ParameterFXPhaserDepth, this->m_PerformanceConfig.GetFXPhaserDepth());
 	this->SetParameter(TParameter::ParameterFXPhaserFeedback, this->m_PerformanceConfig.GetFXPhaserFeedback());
 	this->SetParameter(TParameter::ParameterFXPhaserNbStages, this->m_PerformanceConfig.GetFXPhaserNbStages());
 
-	this->SetParameter(TParameter::ParameterFXDelayEnable, this->m_PerformanceConfig.GetFXDelayEnable());
+	this->SetParameter(TParameter::ParameterFXDelayEnable, this->m_PerformanceConfig.GetFXDelayEnable() ? 1 : 0);
 	this->SetParameter(TParameter::ParameterFXDelayLeftDelayTime, this->m_PerformanceConfig.GetFXDelayLeftDelayTime());
 	this->SetParameter(TParameter::ParameterFXDelayRightDelayTime, this->m_PerformanceConfig.GetFXDelayRightDelayTime());
 	this->SetParameter(TParameter::ParameterFXDelayFeedback, this->m_PerformanceConfig.GetFXDelayFeedback());
 
-	this->SetParameter(TParameter::ParameterFXReverberatorEnable, this->m_PerformanceConfig.GetFXReverberatorEnable());
+	this->SetParameter(TParameter::ParameterFXReverberatorEnable, this->m_PerformanceConfig.GetFXReverberatorEnable() ? 1 : 0);
 	this->SetParameter(TParameter::ParameterFXReverberatorInputGain, this->m_PerformanceConfig.GetFXReverberatorInputGain());
 	this->SetParameter(TParameter::ParameterFXReverberatorTime, this->m_PerformanceConfig.GetFXReverberatorTime());
 	this->SetParameter(TParameter::ParameterFXReverberatorDiffusion, this->m_PerformanceConfig.GetFXReverberatorDiffusion());
@@ -2622,11 +3017,23 @@ void CMiniDexed::LoadPerformanceParameters(void)
 	this->SetParameter(TParameter::ParameterFXReverberator_PlateReverbSend, this->m_PerformanceConfig.GetFXSendLevel(MixerOutput::FX_Reverberator, MixerOutput::FX_PlateReverb));
 	this->SetParameter(TParameter::ParameterFXReverberator_MainOutput, this->m_PerformanceConfig.GetFXSendLevel(MixerOutput::FX_Reverberator, MixerOutput::MainOutput));
 
-	this->mixing_console_->bypass(this->m_PerformanceConfig.IsFXBypass());
+	this->m_pMixingConsole->bypass(this->m_PerformanceConfig.IsFXBypass() ? 1 : 0);
+
+#elif defined(PLAT_REVERB_ENABLE)
+	// Effects
+	SetParameter(ParameterCompressorEnable, m_PerformanceConfig.GetCompressorEnable() ? 1 : 0);
+	SetParameter(ParameterReverbEnable, m_PerformanceConfig.GetReverbEnable() ? 1 : 0);
+	SetParameter(ParameterReverbSize, m_PerformanceConfig.GetReverbSize());
+	SetParameter(ParameterReverbHighDamp, m_PerformanceConfig.GetReverbHighDamp());
+	SetParameter(ParameterReverbLowDamp, m_PerformanceConfig.GetReverbLowDamp());
+	SetParameter(ParameterReverbLowPass, m_PerformanceConfig.GetReverbLowPass());
+	SetParameter(ParameterReverbDiffusion, m_PerformanceConfig.GetReverbDiffusion());
+	SetParameter(ParameterReverbLevel, m_PerformanceConfig.GetReverbLevel());
+
 #endif
 }
 
-std::string CMiniDexed::GetNewPerformanceDefaultName(void)	
+std::string CMiniDexed::GetNewPerformanceDefaultName(void)
 {
 	return m_PerformanceConfig.GetNewPerformanceDefaultName();
 }
@@ -2636,21 +3043,41 @@ void CMiniDexed::SetNewPerformanceName(std::string nName)
 	m_PerformanceConfig.SetNewPerformanceName(nName);
 }
 
-void CMiniDexed::SetVoiceName (std::string VoiceName, unsigned nTG)
+bool CMiniDexed::IsValidPerformance(unsigned nID)
 {
-	assert (nTG < CConfig::ToneGenerators);
-	assert (m_pTG[nTG]);
-	char Name[10];
-	strncpy(Name, VoiceName.c_str(),10);
-	m_pTG[nTG]->getName (Name);
+	return m_PerformanceConfig.IsValidPerformance(nID);
+}
+
+bool CMiniDexed::IsValidPerformanceBank(unsigned nBankID)
+{
+	return m_PerformanceConfig.IsValidPerformanceBank(nBankID);
+}
+
+void CMiniDexed::SetVoiceName(std::string VoiceName, unsigned nTG)
+{
+	assert(nTG < CConfig::AllToneGenerators);
+	if(nTG >= m_nToneGenerators) return;  // Not an active TG
+
+	assert(m_pTG[nTG]);
+	char Name[11];
+	strncpy(Name, VoiceName.c_str(), 10);
+	Name[10] = '\0';
+	m_pTG[nTG]->getName(Name);
 }
 
 bool CMiniDexed::DeletePerformance(unsigned nID)
 {
-	m_bDeletePerformance = true;
-	m_nDeletePerformanceID = nID;
+	if(m_PerformanceConfig.IsValidPerformance(nID) && m_PerformanceConfig.GetInternalFolderOk())
+	{
+		m_bDeletePerformance = true;
+		m_nDeletePerformanceID = nID;
 
-	return true;
+		return true;
+	}
+	else
+	{
+		return false;
+	}
 }
 
 bool CMiniDexed::DoDeletePerformance(void)
@@ -2658,17 +3085,17 @@ bool CMiniDexed::DoDeletePerformance(void)
 	unsigned nID = m_nDeletePerformanceID;
 	if(m_PerformanceConfig.DeletePerformance(nID))
 	{
-		if (m_PerformanceConfig.Load ())
+		if(m_PerformanceConfig.Load())
 		{
 			LoadPerformanceParameters();
 			return true;
 		}
 		else
 		{
-			SetMIDIChannel (CMIDIDevice::OmniMode, 0);
+			SetMIDIChannel(CMIDIDevice::OmniMode, 0);
 		}
 	}
-	
+
 	return false;
 }
 
@@ -2677,132 +3104,132 @@ bool CMiniDexed::GetPerformanceSelectToLoad(void)
 	return m_pConfig->GetPerformanceSelectToLoad();
 }
 
-void CMiniDexed::setModController (unsigned controller, unsigned parameter, uint8_t value, uint8_t nTG)
+void CMiniDexed::setModController(unsigned controller, unsigned parameter, uint8_t value, uint8_t nTG)
 {
-	 uint8_t nBits;
-	
-	switch (controller)
-	{
-		case 0:
-			if (parameter == 0)
-			{
-				setModWheelRange(value, nTG);
-			}
-			else
-			{
-				value=constrain(value, 0, 1);
-				nBits=m_nModulationWheelTarget[nTG];
-				value == 1 ?  nBits |= 1 << (parameter-1) : nBits &= ~(1 << (parameter-1)); 
-				setModWheelTarget(nBits , nTG); 
-			}
-		break;
-		
-		case 1:
-			if (parameter == 0)
-			{
-				setFootControllerRange(value, nTG);
-			}
-			else
-			{
-				value=constrain(value, 0, 1);
-				nBits=m_nFootControlTarget[nTG];
-				value == 1 ?  nBits |= 1 << (parameter-1) : nBits &= ~(1 << (parameter-1)); 
-				setFootControllerTarget(nBits , nTG); 
-			}
-		break;	
+	uint8_t nBits;
 
-		case 2:
-			if (parameter == 0)
-			{
-				setBreathControllerRange(value, nTG);
-			}
-			else
-			{
-				value=constrain(value, 0, 1);
-				nBits=m_nBreathControlTarget[nTG];
-				value == 1 ?  nBits |= 1 << (parameter-1) : nBits &= ~(1 << (parameter-1));
-				setBreathControllerTarget(nBits , nTG); 
-			}
-		break;			
-		
-		case 3:
-			if (parameter == 0)
-			{
-				setAftertouchRange(value, nTG);
-			}
-			else
-			{
-				value=constrain(value, 0, 1);
-				nBits=m_nAftertouchTarget[nTG];
-				value == 1 ?  nBits |= 1 << (parameter-1) : nBits &= ~(1 << (parameter-1));
-				setAftertouchTarget(nBits , nTG); 
-			}
-		break;	
-		default:
+	switch(controller)
+	{
+	case 0:
+		if(parameter == 0)
+		{
+			setModWheelRange(value, nTG);
+		}
+		else
+		{
+			value = constrain(value, 0, 1);
+			nBits = m_nModulationWheelTarget[nTG];
+			value == 1 ? nBits |= 1 << (parameter - 1) : nBits &= ~(1 << (parameter - 1));
+			setModWheelTarget(nBits, nTG);
+		}
+		break;
+
+	case 1:
+		if(parameter == 0)
+		{
+			setFootControllerRange(value, nTG);
+		}
+		else
+		{
+			value = constrain(value, 0, 1);
+			nBits = m_nFootControlTarget[nTG];
+			value == 1 ? nBits |= 1 << (parameter - 1) : nBits &= ~(1 << (parameter - 1));
+			setFootControllerTarget(nBits, nTG);
+		}
+		break;
+
+	case 2:
+		if(parameter == 0)
+		{
+			setBreathControllerRange(value, nTG);
+		}
+		else
+		{
+			value = constrain(value, 0, 1);
+			nBits = m_nBreathControlTarget[nTG];
+			value == 1 ? nBits |= 1 << (parameter - 1) : nBits &= ~(1 << (parameter - 1));
+			setBreathControllerTarget(nBits, nTG);
+		}
+		break;
+
+	case 3:
+		if(parameter == 0)
+		{
+			setAftertouchRange(value, nTG);
+		}
+		else
+		{
+			value = constrain(value, 0, 1);
+			nBits = m_nAftertouchTarget[nTG];
+			value == 1 ? nBits |= 1 << (parameter - 1) : nBits &= ~(1 << (parameter - 1));
+			setAftertouchTarget(nBits, nTG);
+		}
+		break;
+	default:
 		break;
 	}
 }
 
-unsigned CMiniDexed::getModController (unsigned controller, unsigned parameter, uint8_t nTG)
+unsigned CMiniDexed::getModController(unsigned controller, unsigned parameter, uint8_t nTG)
 {
 	unsigned nBits;
-	switch (controller)
+	switch(controller)
 	{
-		case 0:
-			if (parameter == 0)
-			{
-			    return m_nModulationWheelRange[nTG];
-			}
-			else
-			{
-	
-				nBits=m_nModulationWheelTarget[nTG];
-				nBits &= 1 << (parameter-1);				
-				return (nBits != 0 ? 1 : 0) ; 
-			}
-		break;
-		
-		case 1:
-			if (parameter == 0)
-			{
-				return m_nFootControlRange[nTG];
-			}
-			else
-			{
-				nBits=m_nFootControlTarget[nTG];
-				nBits &= 1 << (parameter-1)	;			
-				return (nBits != 0 ? 1 : 0) ; 
-			}
-		break;	
+	case 0:
+		if(parameter == 0)
+		{
+			return m_nModulationWheelRange[nTG];
+		}
+		else
+		{
 
-		case 2:
-			if (parameter == 0)
-			{
-				return m_nBreathControlRange[nTG];
-			}
-			else
-			{
-				nBits=m_nBreathControlTarget[nTG];	
-				nBits &= 1 << (parameter-1)	;			
-				return (nBits != 0 ? 1 : 0) ; 
-			}
-		break;			
-		
-		case 3:
-			if (parameter == 0)
-			{
-				return m_nAftertouchRange[nTG];
-			}
-			else
-			{
-				nBits=m_nAftertouchTarget[nTG];
-				nBits &= 1 << (parameter-1)	;			
-				return (nBits != 0 ? 1 : 0) ; 
-			}
-		break;	
-		
-		default:
-			return 0;
+			nBits = m_nModulationWheelTarget[nTG];
+			nBits &= 1 << (parameter - 1);
+			return (nBits != 0 ? 1 : 0);
+		}
+		break;
+
+	case 1:
+		if(parameter == 0)
+		{
+			return m_nFootControlRange[nTG];
+		}
+		else
+		{
+			nBits = m_nFootControlTarget[nTG];
+			nBits &= 1 << (parameter - 1);
+			return (nBits != 0 ? 1 : 0);
+		}
+		break;
+
+	case 2:
+		if(parameter == 0)
+		{
+			return m_nBreathControlRange[nTG];
+		}
+		else
+		{
+			nBits = m_nBreathControlTarget[nTG];
+			nBits &= 1 << (parameter - 1);
+			return (nBits != 0 ? 1 : 0);
+		}
+		break;
+
+	case 3:
+		if(parameter == 0)
+		{
+			return m_nAftertouchRange[nTG];
+		}
+		else
+		{
+			nBits = m_nAftertouchTarget[nTG];
+			nBits &= 1 << (parameter - 1);
+			return (nBits != 0 ? 1 : 0);
+		}
+		break;
+
+	default:
+		return 0;
 		break;
 	}
 }
