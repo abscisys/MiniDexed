@@ -1,9 +1,15 @@
 cmake_minimum_required(VERSION 3.28)
 
 # Check if RPI is set
+set(DEFAULT_RPI 4)
+if(DEFINED ENV{QEMU} AND "$ENV{QEMU}" EQUAL "1")
+    message(WARNING "Building for QEMU")
+    set(DEFAULT_RPI 3) # QEMU only supports up to Raspberry PI 3
+endif()
+
 if(NOT DEFINED RPI AND NOT DEFINED ENV{RPI})
-    message(WARNING "RPI environment variable is not defined, defaulting it to 4: RPI=4")
-    set(RPI 4 CACHE STRING "Raspberry Pi version")
+    message(WARNING "RPI environment variable is not defined, defaulting it to ${DEFAULT_RPI}: RPI=${DEFAULT_RPI}")
+    set(RPI ${DEFAULT_RPI} CACHE STRING "Raspberry Pi version")
     set(ENV{RPI} ${RPI})
 endif()
 
@@ -86,7 +92,7 @@ if(NOT EXISTS "${CMAKE_BINARY_DIR}/circle-stdlib/Config.mk"
         list(APPEND CONFIG_OPTIONS_LIST "-o ARM_ALLOW_MULTI_CORE")
     endif()
     if(DEFINED QEMU AND QEMU EQUAL 1)
-        list(APPEND CONFIG_OPTIONS_LIST "-o QEMU") 
+        list(APPEND CONFIG_OPTIONS_LIST "--qemu") 
     endif()
 
     # USB Vendor and Device ID for use with USB Gadget Mode 
@@ -243,6 +249,37 @@ add_custom_command(
     COMMENT "Building circle-stdlib library addon properties..."
 )
 
+add_custom_command(
+    OUTPUT "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot/LICENCE.broadcom"
+    OUTPUT "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot/COPYING.linux"
+    OUTPUT "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot/bootcode.bin"
+    OUTPUT "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot/start.elf"
+    OUTPUT "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot/fixup.dat"
+    OUTPUT "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot/start4.elf"
+    OUTPUT "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot/fixup4.dat"
+    OUTPUT "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot/start_cd.elf"
+    OUTPUT "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot/fixup_cd.dat"
+    OUTPUT "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot/start4cd.elf"
+    OUTPUT "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot/fixup4cd.dat"
+    OUTPUT "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot/bcm2710-rpi-zero-2-w.dtb"
+    OUTPUT "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot/bcm2711-rpi-4-b.dtb"
+    OUTPUT "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot/bcm2711-rpi-400.dtb"
+    OUTPUT "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot/bcm2711-rpi-cm4.dtb"
+    OUTPUT "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot/bcm2712-rpi-5-b.dtb"
+
+    COMMAND . ${ENV_FILE} && set -e -x && make -j
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot"
+    COMMENT "Downloading boot loaders"
+)
+
+add_custom_command(
+    OUTPUT "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot/armstub8-rpi4.bin"
+
+    COMMAND . ${ENV_FILE} && set -e -x && make armstub64
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot"
+    COMMENT "Downloading boot loaders"
+)
+
 add_custom_target(
     Circle
 
@@ -272,6 +309,25 @@ add_custom_target(
     DEPENDS "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/addon/display/libdisplay.a"
     DEPENDS "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/addon/sensor/libsensor.a"
     DEPENDS "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/addon/Properties/libproperties.a"
+
+    DEPENDS "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot/LICENCE.broadcom"
+    DEPENDS "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot/COPYING.linux"
+    DEPENDS "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot/bootcode.bin"
+    DEPENDS "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot/start.elf"
+    DEPENDS "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot/fixup.dat"
+    DEPENDS "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot/start4.elf"
+    DEPENDS "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot/fixup4.dat"
+    DEPENDS "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot/start_cd.elf"
+    DEPENDS "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot/fixup_cd.dat"
+    DEPENDS "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot/start4cd.elf"
+    DEPENDS "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot/fixup4cd.dat"
+    DEPENDS "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot/bcm2710-rpi-zero-2-w.dtb"
+    DEPENDS "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot/bcm2711-rpi-4-b.dtb"
+    DEPENDS "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot/bcm2711-rpi-400.dtb"
+    DEPENDS "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot/bcm2711-rpi-cm4.dtb"
+    DEPENDS "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot/bcm2712-rpi-5-b.dtb"
+
+    DEPENDS "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot/armstub8-rpi4.bin"
 
     COMMENT "Circle-stdlib library and addons are built"
 )
@@ -382,9 +438,11 @@ target_link_libraries(
 
 # Add post-build commands to generate lst and img files
 add_custom_command(
-    TARGET MiniDexed
-    POST_BUILD
-    
+    DEPENDS ${TARGET}.elf
+
+    OUTPUT ${TARGET}.lst
+    OUTPUT ${TARGET}.img
+   
     # Generate lst file
     COMMAND ${CMAKE_COMMAND} -E echo "  DUMP  ${TARGET}.lst"
     COMMAND ${CMAKE_OBJDUMP} -d ${TARGET}.elf | ${CMAKE_CXXFILT} > ${TARGET}.lst
@@ -394,9 +452,84 @@ add_custom_command(
     COMMAND ${CMAKE_OBJCOPY} ${TARGET}.elf -O binary ${TARGET}.img
     
     # Display file size
-    COMMAND ${CMAKE_COMMAND} -E echo_append "  WC    ${TARGET}.img => "
+    COMMAND ${CMAKE_COMMAND} -E echo_append "  SIZE  ${TARGET}.img => "
     COMMAND wc -c < ${TARGET}.img
     
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     VERBATIM
+
+    COMMENT "Preparing kernel image"
+)
+
+# Add a custom target that depends on the generated files
+add_custom_target(MiniDexedKernelImage ALL
+    DEPENDS ${TARGET}.lst ${TARGET}.img
+)
+
+add_dependencies(MiniDexedKernelImage MiniDexed)
+
+# Prepare the sdcard installation
+add_custom_command(
+    TARGET MiniDexedKernelImage
+    POST_BUILD
+    
+    # Create sdcard directory
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/sdcard"
+    
+    # Copy boot files
+    COMMAND ${CMAKE_COMMAND} -E copy_directory 
+        "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot" 
+        "${CMAKE_BINARY_DIR}/sdcard"
+    
+    # Remove unwanted files
+    COMMAND ${CMAKE_COMMAND} -E rm -rf
+        "${CMAKE_BINARY_DIR}/sdcard/config*.txt"
+        "${CMAKE_BINARY_DIR}/sdcard/README"
+        "${CMAKE_BINARY_DIR}/sdcard/Makefile"
+        "${CMAKE_BINARY_DIR}/sdcard/COPYING.linux"
+        "${CMAKE_BINARY_DIR}/sdcard/armstub"
+
+    # Copy required files
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/src/config.txt"
+        "${CMAKE_SOURCE_DIR}/src/minidexed.ini"
+        "${CMAKE_BINARY_DIR}/${TARGET}.img"
+        "${CMAKE_SOURCE_DIR}/src/performance.ini"
+        "${CMAKE_SOURCE_DIR}/getsysex.sh"
+        "${CMAKE_BINARY_DIR}/sdcard/"
+    
+    # Create cmdline.txt
+    COMMAND ${CMAKE_COMMAND} -E echo "usbspeed=full" > "${CMAKE_BINARY_DIR}/sdcard/cmdline.txt"
+    
+    # Copy the kernels
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_BINARY_DIR}/kernel*.img"
+        "${CMAKE_BINARY_DIR}/sdcard"
+
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    COMMENT "Preparing the sdcard image"
+)
+
+# Install presets and performances
+add_custom_command(
+    TARGET MiniDexedKernelImage
+    POST_BUILD
+
+    # Create sounds directory
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/sounds"
+    
+    # Clone repository only if it doesn't exist
+    COMMAND ${CMAKE_COMMAND} -E echo "Checking for sounds..."
+    COMMAND ${CMAKE_COMMAND} -P ${CMAKE_SOURCE_DIR}/cmake/prepare_sounds.cmake
+    
+    # Copy files
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_BINARY_DIR}/sounds/Soundplantage/performance"
+        "${CMAKE_BINARY_DIR}/sdcard/performance"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_BINARY_DIR}/sounds/Soundplantage/*.pdf"
+        "${CMAKE_BINARY_DIR}/sdcard"
+
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    COMMENT "Installing presets and performances"
 )
