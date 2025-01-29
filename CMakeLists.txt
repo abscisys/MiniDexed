@@ -2,14 +2,16 @@ cmake_minimum_required(VERSION 3.28)
 
 # Check if RPI is set
 set(DEFAULT_RPI 4)
+set(QEMU OFF CACHE BOOL "Building for QEMU")
 if(DEFINED ENV{QEMU} AND "$ENV{QEMU}" EQUAL "1")
     message(WARNING "Building for QEMU")
+    set(QEMU ON CACHE BOOL "Building for QEMU" FORCE)
     set(DEFAULT_RPI 3) # QEMU only supports up to Raspberry PI 3
 endif()
 
 if(NOT DEFINED RPI AND NOT DEFINED ENV{RPI})
     message(WARNING "RPI environment variable is not defined, defaulting it to ${DEFAULT_RPI}: RPI=${DEFAULT_RPI}")
-    set(RPI ${DEFAULT_RPI} CACHE STRING "Raspberry Pi version")
+    set(RPI ${DEFAULT_RPI} CACHE STRING "Raspberry Pi version" FORCE)
     set(ENV{RPI} ${RPI})
 endif()
 
@@ -88,10 +90,10 @@ if(NOT EXISTS "${CMAKE_BINARY_DIR}/circle-stdlib/Config.mk"
         "-o REALTIME" 
         "-o SCREEN_DMA_BURST_LENGTH=1"
     )
-    if(RPI GREATER 1)
+    if(${RPI} GREATER 1)
         list(APPEND CONFIG_OPTIONS_LIST "-o ARM_ALLOW_MULTI_CORE")
     endif()
-    if(DEFINED QEMU AND QEMU EQUAL 1)
+    if(DEFINED QEMU AND ${QEMU})
         list(APPEND CONFIG_OPTIONS_LIST "--qemu") 
     endif()
 
@@ -529,6 +531,8 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_BINARY_DIR}/sounds/Soundplantage/*.pdf"
         "${CMAKE_BINARY_DIR}/sdcard"
+
+    COMMAND ${CMAKE_COMMAND} -E env bash ${CMAKE_SOURCE_DIR}/cmake/prepareFS.sh ${CMAKE_BINARY_DIR} sdcard ${RPI} ${TARGET} ${QEMU}
 
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     COMMENT "Installing presets and performances"
