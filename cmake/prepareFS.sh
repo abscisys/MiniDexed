@@ -7,8 +7,8 @@ TARGET=$4
 QEMU_SUPPORT=$5
 FULL_DIRECTORY_PATH=${BASE_DIRECTORY}/${IMAGE_NAME}
 FS_IMAGE_PATH=${FULL_DIRECTORY_PATH}.img
-QEMU_SCRIPT=${BASE_DIRECTORY}/simulateQemu.sh
-DEBUG_SCRIPT=${BASE_DIRECTORY}/debugQemu.sh
+QEMU_SCRIPT=${BASE_DIRECTORY}/simulateQEMU.sh
+DEBUG_SCRIPT=${BASE_DIRECTORY}/debugQEMU.sh
 
 if [[ "${QEMU_SUPPORT}" == "ON" ]]; then
 
@@ -76,7 +76,7 @@ fi
     echo "    -cpu ${QEMU_CPU} \\"
     echo "    -m ${QEMU_MEMORY} \\"
     echo "    -kernel ${FULL_DIRECTORY_PATH}/${TARGET}.img \\"
-    echo "    -dtb ${FULL_DIRECTORY_PATH}/${DTD} \\"
+    # echo "    -dtb ${FULL_DIRECTORY_PATH}/${DTD} \\"
     echo "    -nographic \\"
     echo "    -d unimp,guest_errors,in_asm \\"
     echo "    -D qemu.log \\"
@@ -94,6 +94,7 @@ fi
     echo "eval \"\$QEMU_CMD\""
     echo ""
 ) > ${QEMU_SCRIPT}
+chmod +x ${QEMU_SCRIPT}
 
 (
     echo "#!/bin/bash"
@@ -105,5 +106,6 @@ fi
     echo "gdb-multiarch -ex \"target remote localhost:1234\" -ex \"b *0x80000\" ${FULL_DIRECTORY_PATH}/${TARGET}.elf"
     echo ""
 ) > ${DEBUG_SCRIPT}
+chmod +x ${DEBUG_SCRIPT}
 
 fi

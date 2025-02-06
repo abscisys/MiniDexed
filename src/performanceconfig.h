@@ -24,7 +24,7 @@
 #define _performanceconfig_h
 
 #include "config.h"
-#include "mixing_console_constants.h"
+#include "fx/mixing_console_constants.h"
 #include <fatfs/ff.h>
 #include <Properties/propertiesfatfsfile.h>
 #define NUM_VOICE_PARAM 156

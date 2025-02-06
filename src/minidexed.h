@@ -47,10 +47,10 @@
 #include "effect_compressor.h"
 
 #if defined(MIXING_CONSOLE_ENABLE)
-#include "mixing_console.hpp"
+#include "fx/mixing_console.hpp"
 
 typedef MixingConsole<CConfig::AllToneGenerators> Mixer;
-#endif
+#endif // MIXING_CONSOLE_ENABLE
 
 class CMiniDexed
 #ifdef ARM_ALLOW_MULTI_CORE
@@ -176,7 +176,7 @@ public:
 		ParameterReverbLowPass,
 		ParameterReverbDiffusion,
 		ParameterReverbLevel,
-	#endif
+	#endif // PLATE_REVERB_ENABLE || MIXING_CONSOLE_ENABLE
 
 	// BEGIN FX global parameters definition
 	#if defined(MIXING_CONSOLE_ENABLE)
@@ -303,7 +303,7 @@ public:
 
 		// Bypass FX
 		ParameterFXBypass,
-	#endif
+	#endif // MIXING_CONSOLE_ENABLE
 	// END FX global parameters definition
 
 		ParameterPerformanceSelectChannel,
@@ -335,7 +335,7 @@ public:
 		TGParameterMIDIChannel,
 	#if defined(PLATE_REVERB_ENABLE)
 		TGParameterReverbSend,
-	#endif
+	#endif // PLATE_REVERB_ENABLE
 		TGParameterPitchBendRange,
 		TGParameterPitchBendStep,
 		TGParameterPortamentoMode,

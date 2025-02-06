@@ -44,7 +44,7 @@
 #ifndef _EFFECT_PLATERVBSTEREO_H
 #define _EFFECT_PLATERVBSTEREO_H
 
-#include "fx_components.h"
+#include "fx/fx_components.h"
 
 /***
  * Loop delay modulation: comment/uncomment to switch sin/cos 

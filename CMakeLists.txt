@@ -2,21 +2,22 @@ cmake_minimum_required(VERSION 3.28)
 
 # Check if RPI is set
 set(DEFAULT_RPI 4)
-set(QEMU OFF CACHE BOOL "Building for QEMU")
-if(DEFINED ENV{QEMU} AND "$ENV{QEMU}" EQUAL "1")
+option(QEMU "Building for QEMU" OFF)
+if(QEMU)
     message(WARNING "Building for QEMU")
-    set(QEMU ON CACHE BOOL "Building for QEMU" FORCE)
     set(DEFAULT_RPI 3) # QEMU only supports up to Raspberry PI 3
 endif()
 
-if(NOT DEFINED RPI AND NOT DEFINED ENV{RPI})
-    message(WARNING "RPI environment variable is not defined, defaulting it to ${DEFAULT_RPI}: RPI=${DEFAULT_RPI}")
+if(NOT DEFINED RPI OR RPI EQUAL 0)
+    message(WARNING "RPI environment variable is not defined, defaulting it to ${DEFAULT_RPI}: RPI=${DEFAULT_RPI}.")
+    message(WARNING "To avoid any confusion, use 'cmake -DRPI=<version> ...' to set the actual Raspberry Pi version.")
     set(RPI ${DEFAULT_RPI} CACHE STRING "Raspberry Pi version" FORCE)
     set(ENV{RPI} ${RPI})
 endif()
 
-if(DEFINED ENV{DEBUG_BUILD})
-    message(WARNING "Running build in debug mode")
+option(DEBUG_BUILD "Building with verbose information" OFF)
+if(DEBUG_BUILD)
+    message(WARNING "Running build with verbose information")
     set(CMAKE_VERBOSE_MAKEFILE ON)
     execute_process(
         COMMAND set -e
@@ -40,8 +41,8 @@ file(GLOB_RECURSE SYNTHDEXED_SRC_C   "Synth_Dexed/src/*.c")
 file(GLOB_RECURSE SYNTHDEXED_SRC_CPP "Synth_Dexed/src/*.cpp")
 file(GLOB_RECURSE SYNTHDEXED_SRC_H   "Synth_Dexed/src/*.h")
 file(GLOB_RECURSE SYNTHDEXED_SRC_HPP "Synth_Dexed/src/*.hpp")
-list(REMOVE_ITEM SYNTHDEXED_SRC_H   "${CMAKE_CURRENT_SOURCE_DIR}/Synth_Dexed/src/synth_dexed.h")
-list(REMOVE_ITEM SYNTHDEXED_SRC_CPP "${CMAKE_CURRENT_SOURCE_DIR}/Synth_Dexed/src/synth_dexed.cpp")
+list(REMOVE_ITEM  SYNTHDEXED_SRC_H   "${CMAKE_CURRENT_SOURCE_DIR}/Synth_Dexed/src/synth_dexed.h")
+list(REMOVE_ITEM  SYNTHDEXED_SRC_CPP "${CMAKE_CURRENT_SOURCE_DIR}/Synth_Dexed/src/synth_dexed.cpp")
 
 # Glob for source and header files of the MiniDexed
 # file(GLOB_RECURSE MINIDEXED_SRC_C   "src/*.c") # C files are excluded
@@ -353,6 +354,7 @@ add_dependencies(
 )
 
 include_directories(
+    ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/Synth_Dexed/src
     ${CMAKE_SOURCE_DIR}/CMSIS_5/CMSIS/Core/Include
     ${CMAKE_SOURCE_DIR}/CMSIS_5/CMSIS/DSP/Include
