@@ -22,6 +22,9 @@ OBJS += \
        $(SYNTH_DEXED_DIR)/pitchenv.o \
        $(SYNTH_DEXED_DIR)/porta.o \
        $(SYNTH_DEXED_DIR)/sin.o \
+       $(SYNTH_DEXED_DIR)/EngineMkI.o\
+       $(SYNTH_DEXED_DIR)/EngineOpl.o\
+       $(SYNTH_DEXED_DIR)/EngineMsfa.o\
        $(CMSIS_DSP_SOURCE_DIR)/SupportFunctions/SupportFunctions.o \
        $(CMSIS_DSP_SOURCE_DIR)/BasicMathFunctions/BasicMathFunctions.o \
        $(CMSIS_DSP_SOURCE_DIR)/FastMathFunctions/FastMathFunctions.o \
@@ -35,11 +38,8 @@ INCLUDE += -I $(CMSIS_DSP_INCLUDE_DIR)
 INCLUDE += -I $(CMSIS_DSP_PRIVATE_INCLUDE_DIR)
 INCLUDE += -I $(CMSIS_DSP_COMPUTELIB_INCLUDE_DIR)
 
-DEFINE += -DUSE_FX
-
-ifeq ($(strip $(AARCH)),64)
+ifeq ($(RPI), $(filter $(RPI), 3 4 5))
 DEFINE += -DARM_MATH_NEON
+DEFINE += -DARM_MATH_NEON_EXPERIMENTAL
 DEFINE += -DHAVE_NEON
 endif
-
-EXTRACLEAN = $(SYNTH_DEXED_DIR)/*.[od] $(CMSIS_DSP_SOURCE_DIR)/SupportFunctions/*.[od] $(CMSIS_DSP_SOURCE_DIR)/SupportFunctions/*.[od] $(CMSIS_DSP_SOURCE_DIR)/BasicMathFunctions/*.[od] $(CMSIS_DSP_SOURCE_DIR)/FastMathFunctions/*.[od] $(CMSIS_DSP_SOURCE_DIR)/FilteringFunctions/*.[od] $(CMSIS_DSP_SOURCE_DIR)/CommonTables/*.[od] $(CMSIS_DSP_COMPUTELIB_SRC_DIR)/*.[od]

@@ -25,7 +25,6 @@
 #include <circle/writebuffer.h>
 #include <circle/timer.h>
 #include <circle/logger.h>
-#include <circle/usb/usbhcidevice.h>
 #include <SDCard/emmc.h>
 #include <circle/input/console.h>
 #include <circle/sched/scheduler.h>
@@ -160,7 +159,6 @@ public:
                          const char *pPartitionName = CSTDLIBAPP_DEFAULT_PARTITION)
                 : CStdlibAppScreen (kernel),
                   mpPartitionName (pPartitionName),
-                  mUSBHCI (&mInterrupt, &mTimer, TRUE),
                   mEMMC (&mInterrupt, &mTimer, &mActLED),
 #if !defined(__aarch64__) || !defined(LEAVE_QEMU_ON_HALT)
                   //mConsole (&mScreen, TRUE)
@@ -199,16 +197,6 @@ public:
                         return false;
                 }
 
-#if !defined(__aarch64__) || !defined(LEAVE_QEMU_ON_HALT)
-                // The USB driver is not supported under 64-bit QEMU, so
-                // the initialization must be skipped in this case, or an
-                // exit happens here under 64-bit QEMU.
-                if (!mUSBHCI.Initialize ())
-                {
-                        return false;
-                }
-#endif
-
                 if (!mConsole.Initialize ())
                 {
                         return false;
@@ -223,7 +211,7 @@ public:
 
                 return true;
         }
-
+		
         virtual void Cleanup (void)
         {
                 f_mount(0, "", 0);
@@ -232,78 +220,9 @@ public:
         }
 
 protected:
-        CUSBHCIDevice   mUSBHCI;
         CEMMCDevice     mEMMC;
         FATFS           mFileSystem;
         CConsole        mConsole;
 };
 
-/**
- * Stdlib application that adds network functionality
- * to the CStdlibAppStdio features.
- */
-class CStdlibAppNetwork: public CStdlibAppStdio
-{
-public:
-        #define CSTDLIBAPP_WLAN_FIRMWARE_PATH   CSTDLIBAPP_DEFAULT_PARTITION "/firmware/"
-        #define CSTDLIBAPP_WLAN_CONFIG_FILE     CSTDLIBAPP_DEFAULT_PARTITION "/wpa_supplicant.conf"
-
-        CStdlibAppNetwork (const char *kernel,
-                   const char *pPartitionName = CSTDLIBAPP_DEFAULT_PARTITION,
-                   const u8 *pIPAddress      = 0,       // use DHCP if pIPAddress == 0
-                   const u8 *pNetMask        = 0,
-                   const u8 *pDefaultGateway = 0,
-                   const u8 *pDNSServer      = 0,
-                   TNetDeviceType DeviceType = NetDeviceTypeEthernet)
-          : CStdlibAppStdio(kernel, pPartitionName),
-            mDeviceType (DeviceType),
-            mWLAN (CSTDLIBAPP_WLAN_FIRMWARE_PATH),
-            mNet(pIPAddress, pNetMask, pDefaultGateway, pDNSServer, DEFAULT_HOSTNAME, DeviceType),
-            mWPASupplicant (CSTDLIBAPP_WLAN_CONFIG_FILE)
-        {
-        }
-
-        virtual bool Initialize (bool const bWaitForActivate = true)
-        {
-                if (!CStdlibAppStdio::Initialize ())
-                {
-                        return false;
-                }
-
-                if (mDeviceType == NetDeviceTypeWLAN)
-                {
-                        if (!mWLAN.Initialize ())
-                        {
-                                return false;
-                        }
-                }
-
-                if (!mNet.Initialize (false))
-                {
-                        return false;
-                }
-
-                if (mDeviceType == NetDeviceTypeWLAN)
-                {
-                        if (!mWPASupplicant.Initialize ())
-                        {
-                                return false;
-                        }
-                }
-
-                while (bWaitForActivate && !mNet.IsRunning ())
-                {
-                        mScheduler.Yield ();
-                }
-
-                return true;
-        }
-
-protected:
-        CScheduler      mScheduler;
-        TNetDeviceType  mDeviceType;
-        CBcm4343Device  mWLAN;
-        CNetSubSystem   mNet;
-        CWPASupplicant  mWPASupplicant;
-};
 #endif

@@ -30,6 +30,9 @@
 #include <circle/spinlock.h>
 #include "userinterface.h"
 
+#define MAX_DX7_SYSEX_LENGTH 4104
+#define MAX_MIDI_MESSAGE MAX_DX7_SYSEX_LENGTH
+
 class CMiniDexed;
 
 class CMIDIDevice
@@ -51,18 +54,31 @@ public:
 	u8 GetChannel (unsigned nTG) const;
 
 	virtual void Send (const u8 *pMessage, size_t nLength, unsigned nCable = 0) {}
-	virtual void SendSystemExclusiveVoice(uint8_t nVoice, const unsigned nCable, uint8_t nTG);
+	// Change signature to specify device name
+	void SendSystemExclusiveVoice(uint8_t nVoice, const std::string& deviceName, unsigned nCable, uint8_t nTG);
+	const std::string& GetDeviceName() const { return m_DeviceName; }
 
 protected:
 	void MIDIMessageHandler (const u8 *pMessage, size_t nLength, unsigned nCable = 0);
 	void AddDevice (const char *pDeviceName);
 	void HandleSystemExclusive(const uint8_t* pMessage, const size_t nLength, const unsigned nCable, const uint8_t nTG);
+
+private:
+	bool HandleMIDISystemCC(const u8 ucCC, const u8 ucCCval);
+
 private:
 	CMiniDexed *m_pSynthesizer;
 	CConfig *m_pConfig;
 	CUserInterface *m_pUI;
 
-	u8 m_ChannelMap[CConfig::ToneGenerators];
+	u8 m_ChannelMap[CConfig::AllToneGenerators];
+	u8 m_PreviousChannelMap[CConfig::AllToneGenerators]; // Store previous channels for OMNI OFF restore
+	
+	unsigned m_nMIDISystemCCVol;
+	unsigned m_nMIDISystemCCPan;
+	unsigned m_nMIDISystemCCDetune;
+	u32	 m_MIDISystemCCBitmap[4]; // to allow for 128 bit entries
+	unsigned m_nMIDIGlobalExpression;
 
 	std::string m_DeviceName;
 

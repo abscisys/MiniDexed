@@ -22,6 +22,7 @@
 #include <assert.h>
 #include <circle/timer.h>
 #include <string.h>
+#include "midi.h"
 
 LOGMODULE ("uibuttons");
 
@@ -76,7 +77,7 @@ boolean CUIButton::Initialize (unsigned pinNumber, unsigned doubleClickTimeout, 
 	{
 		if (isMidiPin(m_pinNumber))
 		{
-			LOGDBG("MIDI Button on pin: %d (%x)", m_pinNumber, m_pinNumber);
+			LOGDBG("MIDI Button on msg: %d (%x)", MidiPinToCC(m_pinNumber), MidiPinToCC(m_pinNumber));
 			m_midipin = new CMIDIPin (m_pinNumber);
 		} else {
 			LOGDBG("GPIO Button on pin: %d (%x)", m_pinNumber, m_pinNumber);
@@ -257,33 +258,8 @@ CUIButton::BtnTrigger CUIButton::triggerTypeFromString(const char* triggerString
 }
 
 
-CUIButtons::CUIButtons (
-			unsigned prevPin, const char *prevAction,
-			unsigned nextPin, const char *nextAction,
-			unsigned backPin, const char *backAction,
-			unsigned selectPin, const char *selectAction,
-			unsigned homePin, const char *homeAction,
-			unsigned doubleClickTimeout, unsigned longPressTimeout,
-			unsigned notesMidi, unsigned prevMidi, unsigned nextMidi, unsigned backMidi, unsigned selectMidi, unsigned homeMidi
-)
-:	m_doubleClickTimeout(doubleClickTimeout),
-	m_longPressTimeout(longPressTimeout),
-	m_prevPin(prevPin),
-	m_prevAction(CUIButton::triggerTypeFromString(prevAction)),
-	m_nextPin(nextPin),
-	m_nextAction(CUIButton::triggerTypeFromString(nextAction)),
-	m_backPin(backPin),
-	m_backAction(CUIButton::triggerTypeFromString(backAction)),
-	m_selectPin(selectPin),
-	m_selectAction(CUIButton::triggerTypeFromString(selectAction)),
-	m_homePin(homePin),
-	m_homeAction(CUIButton::triggerTypeFromString(homeAction)),
-	m_notesMidi(notesMidi),
-	m_prevMidi(ccToMidiPin(prevMidi)),
-	m_nextMidi(ccToMidiPin(nextMidi)),
-	m_backMidi(ccToMidiPin(backMidi)),
-	m_selectMidi(ccToMidiPin(selectMidi)),
-	m_homeMidi(ccToMidiPin(homeMidi)),
+CUIButtons::CUIButtons (CConfig *pConfig)
+:	m_pConfig(pConfig),
 	m_eventHandler (0),
 	m_lastTick (0)
 {
@@ -295,6 +271,46 @@ CUIButtons::~CUIButtons (void)
 
 boolean CUIButtons::Initialize (void)
 {
+	assert (m_pConfig);
+
+	// Read the button configuration
+	m_doubleClickTimeout = m_pConfig->GetDoubleClickTimeout ();
+	m_longPressTimeout = m_pConfig->GetLongPressTimeout ();
+	m_prevPin = m_pConfig->GetButtonPinPrev ();
+	m_prevAction = CUIButton::triggerTypeFromString( m_pConfig->GetButtonActionPrev ());
+	m_nextPin = m_pConfig->GetButtonPinNext ();
+	m_nextAction = CUIButton::triggerTypeFromString( m_pConfig->GetButtonActionNext ());
+	m_backPin = m_pConfig->GetButtonPinBack ();
+	m_backAction = CUIButton::triggerTypeFromString( m_pConfig->GetButtonActionBack ());
+	m_selectPin = m_pConfig->GetButtonPinSelect ();
+	m_selectAction = CUIButton::triggerTypeFromString( m_pConfig->GetButtonActionSelect ());
+	m_homePin = m_pConfig->GetButtonPinHome ();
+	m_homeAction = CUIButton::triggerTypeFromString( m_pConfig->GetButtonActionHome ());
+	m_pgmUpPin = m_pConfig->GetButtonPinPgmUp ();
+	m_pgmUpAction = CUIButton::triggerTypeFromString( m_pConfig->GetButtonActionPgmUp ());
+	m_pgmDownPin = m_pConfig->GetButtonPinPgmDown ();
+	m_pgmDownAction = CUIButton::triggerTypeFromString( m_pConfig->GetButtonActionPgmDown ());
+	m_BankUpPin = m_pConfig->GetButtonPinBankUp ();
+	m_BankUpAction = CUIButton::triggerTypeFromString( m_pConfig->GetButtonActionBankUp ());
+	m_BankDownPin = m_pConfig->GetButtonPinBankDown ();
+	m_BankDownAction = CUIButton::triggerTypeFromString( m_pConfig->GetButtonActionBankDown ());
+	m_TGUpPin = m_pConfig->GetButtonPinTGUp ();
+	m_TGUpAction = CUIButton::triggerTypeFromString( m_pConfig->GetButtonActionTGUp ());
+	m_TGDownPin = m_pConfig->GetButtonPinTGDown ();
+	m_TGDownAction = CUIButton::triggerTypeFromString( m_pConfig->GetButtonActionTGDown ());
+	m_notesMidi = ccToMidiPin( m_pConfig->GetMIDIButtonNotes ());
+	m_prevMidi = ccToMidiPin( m_pConfig->GetMIDIButtonPrev ());
+	m_nextMidi = ccToMidiPin( m_pConfig->GetMIDIButtonNext ());
+	m_backMidi = ccToMidiPin( m_pConfig->GetMIDIButtonBack ());
+	m_selectMidi = ccToMidiPin( m_pConfig->GetMIDIButtonSelect ());
+	m_homeMidi = ccToMidiPin( m_pConfig->GetMIDIButtonHome ());
+	m_pgmUpMidi = ccToMidiPin( m_pConfig->GetMIDIButtonPgmUp ());
+	m_pgmDownMidi = ccToMidiPin( m_pConfig->GetMIDIButtonPgmDown ());
+	m_BankUpMidi = ccToMidiPin( m_pConfig->GetMIDIButtonBankUp ());
+	m_BankDownMidi = ccToMidiPin( m_pConfig->GetMIDIButtonBankDown ());
+	m_TGUpMidi = ccToMidiPin( m_pConfig->GetMIDIButtonTGUp ());
+	m_TGDownMidi = ccToMidiPin( m_pConfig->GetMIDIButtonTGDown ());
+	
 	// First sanity check and convert the timeouts:
 	// Internally values are in tenths of a millisecond, but config values
 	// are in milliseconds
@@ -315,14 +331,16 @@ boolean CUIButtons::Initialize (void)
 	// longpress. We may not initialise all of the buttons.
 	// MIDI buttons only support a single click.
 	unsigned pins[MAX_BUTTONS] = {
-		m_prevPin, m_nextPin, m_backPin, m_selectPin, m_homePin,
-		m_prevMidi, m_nextMidi, m_backMidi, m_selectMidi, m_homeMidi
+		m_prevPin, m_nextPin, m_backPin, m_selectPin, m_homePin, m_pgmUpPin,  m_pgmDownPin,  m_BankUpPin,  m_BankDownPin, m_TGUpPin,  m_TGDownPin, 
+		m_prevMidi, m_nextMidi, m_backMidi, m_selectMidi, m_homeMidi, m_pgmUpMidi, m_pgmDownMidi, m_BankUpMidi, m_BankDownMidi, m_TGUpMidi, m_TGDownMidi
 	};
 	CUIButton::BtnTrigger triggers[MAX_BUTTONS] = {
 		// Normal buttons
 		m_prevAction, m_nextAction, m_backAction, m_selectAction, m_homeAction,
+		m_pgmUpAction, m_pgmDownAction, m_BankUpAction, m_BankDownAction, m_TGUpAction, m_TGDownAction, 
 		// MIDI Buttons only support a single click (at present)
-		CUIButton::BtnTriggerClick, CUIButton::BtnTriggerClick, CUIButton::BtnTriggerClick, CUIButton::BtnTriggerClick, CUIButton::BtnTriggerClick
+		CUIButton::BtnTriggerClick, CUIButton::BtnTriggerClick, CUIButton::BtnTriggerClick, CUIButton::BtnTriggerClick, CUIButton::BtnTriggerClick,
+		CUIButton::BtnTriggerClick, CUIButton::BtnTriggerClick, CUIButton::BtnTriggerClick, CUIButton::BtnTriggerClick, CUIButton::BtnTriggerClick, CUIButton::BtnTriggerClick
 	};
 	CUIButton::BtnEvent events[MAX_BUTTONS] = {
 		// Normal buttons
@@ -331,12 +349,24 @@ boolean CUIButtons::Initialize (void)
 		CUIButton::BtnEventBack,
 		CUIButton::BtnEventSelect,
 		CUIButton::BtnEventHome,
+		CUIButton::BtnEventPgmUp,
+		CUIButton::BtnEventPgmDown,
+		CUIButton::BtnEventBankUp,
+		CUIButton::BtnEventBankDown,
+		CUIButton::BtnEventTGUp,
+		CUIButton::BtnEventTGDown,
 		// MIDI buttons
 		CUIButton::BtnEventPrev,
 		CUIButton::BtnEventNext,
 		CUIButton::BtnEventBack,
 		CUIButton::BtnEventSelect,
-		CUIButton::BtnEventHome
+		CUIButton::BtnEventHome,
+		CUIButton::BtnEventPgmUp,
+		CUIButton::BtnEventPgmDown,
+		CUIButton::BtnEventBankUp,
+		CUIButton::BtnEventBankDown,
+		CUIButton::BtnEventTGUp,
+		CUIButton::BtnEventTGDown
 	};
 
 	// Setup normal GPIO buttons first
@@ -352,6 +382,7 @@ boolean CUIButtons::Initialize (void)
 		for (unsigned j=0; j<MAX_BUTTONS; j++) {
 			if (m_buttons[j].getPinNumber() == pins[i]) {
 				// This pin is already assigned
+				LOGNOTE("Note: GPIO pin %d is already assigned", pins[i]);
 				break;
 			}
 			else if (m_buttons[j].getPinNumber() == 0) {
@@ -460,22 +491,22 @@ void CUIButtons::ResetButton (unsigned pinNumber)
 	}
 }
 
-void CUIButtons::BtnMIDICmdHandler (unsigned nMidiCmd, unsigned nMidiData1, unsigned nMidiData2)
+void CUIButtons::BtnMIDICmdHandler (unsigned nMidiType, unsigned nMidiData1, unsigned nMidiData2)
 {
 	if (m_notesMidi > 0) {
-//		LOGDBG("BtnMIDICmdHandler (notes): %x %x %x)", nMidiCmd, nMidiData1, nMidiData2);
+//		LOGDBG("BtnMIDICmdHandler (notes): %x %x %x)", nMidiType, nMidiData1, nMidiData2);
 		// Using MIDI Note messages for MIDI buttons
 		unsigned midiPin = ccToMidiPin(nMidiData1);
 		for (unsigned i=0; i<MAX_BUTTONS; i++) {
 			if (m_buttons[i].getPinNumber() == midiPin) {
-				if (nMidiCmd == 0x80) {
-					// NoteOff = Button OFF
+				if (nMidiType == MIDI_NOTE_OFF) {
+					// Button OFF
 					m_buttons[i].Write (0);
-				} else if ((nMidiCmd == 0x90) && (nMidiData2 == 0)) {
-					// NoteOn with Vel == 0 = Button OFF
+				} else if ((nMidiType == MIDI_NOTE_ON) && (nMidiData2 == 0)) {
+					// Button OFF (MIDI_NOTE_ON with Vel == 0)
 					m_buttons[i].Write (0);
-				} else if (nMidiCmd == 0x90) {
-					// NoteOn = Button ON
+				} else if (nMidiType == MIDI_NOTE_ON) {
+					// Button ON
 					m_buttons[i].Write (127);
 				} else {
 					// Ignore other MIDI commands
@@ -483,9 +514,9 @@ void CUIButtons::BtnMIDICmdHandler (unsigned nMidiCmd, unsigned nMidiData1, unsi
 			}
 		}
 	} else {
-//		LOGDBG("BtnMIDICmdHandler (CC): %x %x %x)", nMidiCmd, nMidiData1, nMidiData2);
+//		LOGDBG("BtnMIDICmdHandler (CC): %x %x %x)", nMidiType, nMidiData1, nMidiData2);
 		// Using MIDI CC messages for MIDI buttons
-		if (nMidiCmd == 0xB0) {  // Control Message
+		if (nMidiType == MIDI_CONTROL_CHANGE) {
 			unsigned midiPin = ccToMidiPin(nMidiData1);
 			for (unsigned i=0; i<MAX_BUTTONS; i++) {
 				if (m_buttons[i].getPinNumber() == midiPin) {
@@ -493,5 +524,5 @@ void CUIButtons::BtnMIDICmdHandler (unsigned nMidiCmd, unsigned nMidiData1, unsi
 				}
 			}
 		}
-	}	
+	}
 }

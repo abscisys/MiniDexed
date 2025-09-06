@@ -26,16 +26,18 @@
 #include <sensor/ky040.h>
 #include <display/hd44780device.h>
 #include <display/ssd1306device.h>
+#include <display/st7789device.h>
 #include <circle/gpiomanager.h>
 #include <circle/writebuffer.h>
 #include <circle/i2cmaster.h>
+#include <circle/spimaster.h>
 
 class CMiniDexed;
 
 class CUserInterface
 {
 public:
-	CUserInterface (CMiniDexed *pMiniDexed, CGPIOManager *pGPIOManager, CI2CMaster *pI2CMaster, CConfig *pConfig);
+	CUserInterface (CMiniDexed *pMiniDexed, CGPIOManager *pGPIOManager, CI2CMaster *pI2CMaster, CSPIMaster *pSPIMaster, CConfig *pConfig);
 	~CUserInterface (void);
 
 	bool Initialize (void);
@@ -43,6 +45,7 @@ public:
 	void Process (void);
 
 	void ParameterChanged (void);
+	void DisplayChanged (void);
 
 	// Write to display in this format:
 	// +----------------+
@@ -53,7 +56,7 @@ public:
 			   bool bArrowDown, bool bArrowUp);
 
 	// To be called from the MIDI device on reception of a MIDI CC message
-	void UIMIDICmdHandler (unsigned nMidiCh, unsigned nMidiCmd, unsigned nMidiData1, unsigned nMidiData2);
+	void UIMIDICmdHandler (unsigned nMidiCh, unsigned nMidiType, unsigned nMidiData1, unsigned nMidiData2);
 
 private:
 	void LCDWrite (const char *pString);		// Print to optional HD44780 display
@@ -68,11 +71,14 @@ private:
 	CMiniDexed *m_pMiniDexed;
 	CGPIOManager *m_pGPIOManager;
 	CI2CMaster *m_pI2CMaster;
+	CSPIMaster *m_pSPIMaster;
 	CConfig *m_pConfig;
 
 	CCharDevice    *m_pLCD;
 	CHD44780Device *m_pHD44780;
 	CSSD1306Device *m_pSSD1306;
+	CST7789Display *m_pST7789Display;
+	CST7789Device  *m_pST7789;
 	CWriteBufferDevice *m_pLCDBuffered;
 	
 	CUIButtons *m_pUIButtons;

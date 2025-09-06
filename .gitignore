@@ -34,8 +34,9 @@
 
 # Toolchain
 gcc-*
+arm-gnu-*
 
-# Build artefacts
+# Build artifacts
 kernel*
 MiniDexed*
 sdcard
@@ -52,3 +53,11 @@ src/test/*.bin
 src/test/bin
 src/test/results
 src/test/objects
+
+# git submodules
+CMSIS_5
+circle-stdlib
+Synth_Dexed
+
+# Build directories
+minidexed_*
