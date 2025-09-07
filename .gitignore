@@ -61,3 +61,5 @@ Synth_Dexed
 
 # Build directories
 minidexed_*
+build
+.c
