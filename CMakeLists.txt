@@ -154,8 +154,34 @@ else()
     load_key_value_file("${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/Config.mk")
 
     if(NOT DEFINED AARCH)
-        message(FATAL_ERROR "AARCH is not defined in ${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/Config.mk")
+        message(WARNING "AARCH is not defined in ${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/Config.mk. Defaulting to 32 bits architecture.")
+        set(AARCH "32" CACHE STRING "Default to 32 bits architecture" FORCE)
+        set(_AARCH "" CACHE STRING "Original value of AARCH" FORCE)
+    else()
+        set(_AARCH "${AARCH}" CACHE STRING "Original value of AARCH" FORCE)
     endif()
+
+    # Detect the compiler libraries to link against
+    set(ARCH_RAW "${ARCH}")
+    separate_arguments(ARCH_LIST UNIX_COMMAND "${ARCH_RAW}")
+
+    message(STATUS "Detecting compiler libraries to link against...")
+    execute_process(
+        COMMAND ${CMAKE_CXX_COMPILER} ${ARCH_LIST} -print-file-name=libgcc.a
+        OUTPUT_VARIABLE LIBGCC
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    message(STATUS "-> Libgcc: ${LIBGCC}")
+    set(LIBGCC "${LIBGCC}" CACHE STRING "Path to libgcc.a based on compiler flags")
+
+    execute_process(
+        COMMAND ${CMAKE_CXX_COMPILER} ${ARCH_LIST} -print-file-name=libstdc++.a
+        OUTPUT_VARIABLE LIBSTDCPP
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    message(STATUS "-> Libstdc++: ${LIBSTDCPP}")
+    set(LIBSTDCPP "${LIBSTDCPP}" CACHE STRING "Path to libstdc++.a based on compiler flags")
+
 endif()
 
 set(TOOLCHAIN_LIB_PATH ${TOOLCHAIN_BIN_PATH}/../${TOOLCHAIN_NAME}/lib CACHE FILEPATH "Toolchain lib path" FORCE)
@@ -163,11 +189,11 @@ set(TOOLCHAIN_LIB_PATH ${TOOLCHAIN_BIN_PATH}/../${TOOLCHAIN_NAME}/lib CACHE FILE
 if(${AARCH} EQUAL 32)
     if(${RPI} EQUAL 1)
         set(TARGET "kernel" CACHE STRING "Target name for RPI 1 32 bits")
-    elseif(${RPI EQUAL 2})
+    elseif(${RPI} EQUAL 2)
         set(TARGET "kernel7" CACHE STRING "Target name for RPI 2 32 bits")
-    elseif(${RPI EQUAL 3})
+    elseif(${RPI} EQUAL 3)
         set(TARGET "kernel8-32" CACHE STRING "Target name for RPI 3 32 bits")
-    elseif(${RPI EQUAL 4})
+    elseif(${RPI} EQUAL 4)
         set(TARGET "kernel7l" CACHE STRING "Target name for RPI 4 32 bits")
     else()
         message(FATAL_ERROR "For 32 bits platform, RPI must be set to 1, 2, 3 or 4")
@@ -283,7 +309,7 @@ add_custom_command(
 add_custom_command(
     OUTPUT "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot/armstub8-rpi4.bin"
 
-    COMMAND . ${ENV_FILE} && set -e -x && make armstub64
+    COMMAND . ${ENV_FILE} && set -e -x && make armstub${_AARCH}
     WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/boot"
     COMMENT "Downloading boot loaders"
 )
@@ -376,32 +402,46 @@ include_directories(
     ${CMAKE_BINARY_DIR}/circle-stdlib/install/${NEWLIB_ARCH}/include    
 )
 
+separate_arguments(ARCH_LIST UNIX_COMMAND ${ARCH})
+separate_arguments(DEFINE_LIST UNIX_COMMAND ${DEFINE})
+
+# Define a list of NEON-capable Pi models
+set(NEON_RPI_LIST "3" "4" "5")
+
+# Check if RPI is in the list
+list(FIND NEON_RPI_LIST "${RPI}" RPI_INDEX)
+if(NOT RPI_INDEX EQUAL -1)
+    list(APPEND DEFINE_LIST
+        -DARM_MATH_NEON
+        -DARM_MATH_NEON_EXPERIMENTAL
+        -DHAVE_NEON
+    )
+endif()
+
 target_compile_definitions(
     MiniDexed
     PRIVATE
     USE_FX
+    ${DEFINE_LIST}
     __circle__=${CIRCLEVER}
     RASPPI=${RASPPI}
     STDLIB_SUPPORT=${STDLIB_SUPPORT}
     __VCCOREVER__=0x04000000
 )
 
-separate_arguments(ARCH_LIST UNIX_COMMAND ${ARCH})
-separate_arguments(DEFINE_LIST UNIX_COMMAND ${DEFINE})
-
 target_compile_options(
     MiniDexed 
     PRIVATE 
     ${CFLAGS}
     ${ARCH_LIST}
-    ${DEFINE_LIST}
     -Wall
     -fsigned-char
+    -fno-exceptions
     -g
     -U__unix__
     -U__linux__
     -O3
-    $<$<COMPILE_LANGUAGE:CXX>:-Wno-aligned-new>
+    $<$<COMPILE_LANGUAGE:CXX>:-fno-rtti -Wno-aligned-new>
 )
 
 set_target_properties(
@@ -416,6 +456,7 @@ target_link_options(
     PRIVATE 
     -Map ${TARGET}.map
     --section-start=.init=${LOADADDR}
+    --no-warn-rwx-segments
     -T ${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/circle.ld
 )
 
@@ -435,11 +476,9 @@ set(GROUPED_LIBS
     ${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/lib/fs/libfs.a
     ${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/lib/sched/libsched.a
     ${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/lib/libcircle.a
-    ${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/addon/wlan/libwlan.a
     ${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/addon/wlan/hostap/wpa_supplicant/libwpa_supplicant.a
+    ${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/addon/wlan/libwlan.a
     ${CMAKE_BINARY_DIR}/circle-stdlib/libs/circle/lib/net/libnet.a
-    ${TOOLCHAIN_LIB_PATH}/libstdc++.a
-    ${STDDEF_INCPATH}/../libgcc.a
 )
 
 target_link_libraries(
@@ -447,6 +486,8 @@ target_link_libraries(
     PRIVATE
     "--start-group"
     ${GROUPED_LIBS}
+    ${LIBSTDCPP}
+    ${LIBGCC}
     "--end-group"
 )
 
